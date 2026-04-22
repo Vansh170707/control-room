@@ -1,0 +1,10 @@
+project_id = "clawbuddy-litekit"
+
+[functions.agent-ingest]
+verify_jwt = false
+
+[functions.claim-command]
+verify_jwt = false
+
+[functions.issue-command]
+verify_jwt = false
