@@ -4233,6 +4233,19 @@ function App() {
   }, []);
 
   useEffect(() => {
+    if (!runtimeHealth.ok) {
+      return;
+    }
+
+    setChatError((current) =>
+      current?.includes("Local runtime is not reachable") ||
+      current?.includes("Local sandbox is not connected")
+        ? null
+        : current,
+    );
+  }, [runtimeHealth.ok]);
+
+  useEffect(() => {
     if (!hasAgentRuntime || !runtimeHealth.ok) {
       return;
     }

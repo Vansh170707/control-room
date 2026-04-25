@@ -250,9 +250,9 @@ function renderThreadMessage(args: {
                   />
                   {presence.timeline}
                 </span>
-                {presence.stepLabels.map((label) => (
+                {presence.stepLabels.map((label, labelIndex) => (
                   <span
-                    key={`${message.id}-${label}`}
+                    key={`${message.id}-${label}-${labelIndex}`}
                     className="inline-flex items-center rounded-full border border-white/8 bg-white/[0.03] px-2.5 py-1 text-[10px] text-[#a6b8c8]"
                   >
                     {label}
