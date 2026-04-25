@@ -75,6 +75,7 @@ import {
   type RuntimeArtifact,
   type RuntimeChatMessage,
   type RuntimeCommandRunRecord,
+  type RuntimeExecuteResult,
   type RuntimeHealth,
   type RuntimeExecuteStreamEvent,
 } from "@/lib/agent-runtime";
@@ -374,6 +375,11 @@ export interface ExecutionStepResult {
     artifacts?: RuntimeArtifact[] | null;
   };
 }
+
+type CommandExecutionRequestResult =
+  | { status: "completed"; result: RuntimeExecuteResult }
+  | { status: "waiting_for_approval" }
+  | { status: "blocked" };
 
 export interface LiveActivityEntry {
   id: string;
@@ -5976,6 +5982,7 @@ function App() {
       const executionSteps: ExecutionStepResult[] = [];
       let finalReasoning = "";
       let loopBlocked = false;
+      let loopWaitingForApproval = false;
       const seenCommands = new Set<string>();
 
       for (let stepIndex = 0; stepIndex < 4; stepIndex += 1) {
@@ -5998,20 +6005,28 @@ function App() {
         }
 
         seenCommands.add(commandSignature);
-        const executionResult = await handleCommandExecutionRequest({
+        const commandExecution = await handleCommandExecutionRequest({
           agent: input.agent,
           command: executionPlan.command,
           cwd: executionPlan.cwd || input.agent.workspace || "",
           source: "agent",
         });
 
-        if (!executionResult) {
+        if (commandExecution.status === "waiting_for_approval") {
+          loopWaitingForApproval = true;
+          finalReasoning =
+            "Execution is waiting for command approval before continuing.";
+          break;
+        }
+
+        if (commandExecution.status === "blocked") {
           loopBlocked = true;
           finalReasoning =
             "Execution could not continue because the next sandbox action was blocked.";
           break;
         }
 
+        const executionResult = commandExecution.result;
         executionSteps.push({
           command: executionPlan.command,
           cwd: executionPlan.cwd || input.agent.workspace || "",
@@ -6066,6 +6081,15 @@ function App() {
           finalReasoning = "Execution stopped because a sandbox step failed.";
           break;
         }
+      }
+
+      if (loopWaitingForApproval) {
+        return {
+          ok: false,
+          text:
+            finalReasoning ||
+            "Execution is waiting for command approval before continuing.",
+        };
       }
 
       if (loopBlocked) {
@@ -7086,7 +7110,7 @@ function App() {
     source: CommandExecutionSource;
     task?: DelegationTask;
     ownerName?: string;
-  }) {
+  }): Promise<CommandExecutionRequestResult> {
     const review = reviewCommand(input.command, input.agent.sandboxMode);
     const autoApprove =
       review.status === "approval" &&
@@ -7097,7 +7121,7 @@ function App() {
         ...input,
         review,
       });
-      return null;
+      return { status: "blocked" };
     }
 
     if (review.status === "approval" && !autoApprove) {
@@ -7105,10 +7129,11 @@ function App() {
         ...input,
         reasons: review.reasons,
       });
-      return null;
+      return { status: "waiting_for_approval" };
     }
 
-    return runCommandForAgent(input);
+    const result = await runCommandForAgent(input);
+    return result ? { status: "completed", result } : { status: "blocked" };
   }
 
   function handleCancelCommandApproval() {
@@ -7221,7 +7246,7 @@ function App() {
       if (approval.queueId) {
         resolveApprovalQueueItem(approval.queueId, "approved");
       }
-      await runCommandForAgent({
+      const result = await runCommandForAgent({
         agent,
         command: approval.command,
         cwd: approval.cwd,
@@ -7229,6 +7254,37 @@ function App() {
         task,
         ownerName: approval.ownerName ?? undefined,
       });
+
+      if (approval.source === "agent" && result) {
+        const completionText = result.ok
+          ? [
+              `Done - I ran \`${approval.command}\`.`,
+              result.cwd ? `Location: \`${result.cwd}\`.` : "",
+              typeof result.exitCode === "number"
+                ? `Exit code: ${result.exitCode}.`
+                : "",
+              result.stdout?.trim() ? `Output:\n${result.stdout.trim()}` : "",
+            ]
+              .filter(Boolean)
+              .join("\n\n")
+          : [
+              `I tried to run \`${approval.command}\`, but it failed.`,
+              result.cwd ? `Location: \`${result.cwd}\`.` : "",
+              typeof result.exitCode === "number"
+                ? `Exit code: ${result.exitCode}.`
+                : "",
+              result.error ? `Error: ${result.error}` : "",
+              result.stderr?.trim() ? `stderr:\n${result.stderr.trim()}` : "",
+            ]
+              .filter(Boolean)
+              .join("\n\n");
+
+        await streamAssistantReply({
+          agent,
+          text: completionText,
+          previousThread: messagesByAgent[agent.id] ?? [],
+        });
+      }
     } finally {
       setIsProcessingCommandApproval(false);
     }
@@ -8386,14 +8442,39 @@ function App() {
             timestamp: new Date().toISOString(),
           }));
 
-          const executionResult = await handleCommandExecutionRequest({
+          const commandExecution = await handleCommandExecutionRequest({
             agent: selectedAgentSnapshot,
             command: executionPlan.command,
             cwd: executionPlan.cwd || selectedAgentSnapshot.workspace || "",
             source: "agent",
           });
 
-          if (!executionResult) {
+          if (commandExecution.status === "waiting_for_approval") {
+            updateLiveActivity(thinkingActivityId, (entry) => ({
+              ...entry,
+              status: "idle",
+              detail: "Waiting for approval before running the sandbox command.",
+              timestamp: new Date().toISOString(),
+            }));
+            updateTaskTree(taskTree.id, (current) => ({
+              ...current,
+              status: "running",
+              updatedAt: new Date().toISOString(),
+              nodes: current.nodes.map((node) =>
+                node.kind === "execution"
+                  ? {
+                      ...node,
+                      status: "running",
+                      updatedAt: new Date().toISOString(),
+                    }
+                  : node,
+              ),
+            }));
+            finishReplyingForAgent();
+            return;
+          }
+
+          if (commandExecution.status === "blocked") {
             loopBlocked = true;
             finalReasoning =
               "Execution could not continue because the next sandbox action was blocked.";
@@ -8408,6 +8489,7 @@ function App() {
             error: undefined,
           }));
 
+          const executionResult = commandExecution.result;
           executionSteps.push({
             command: executionPlan.command,
             cwd: executionPlan.cwd || selectedAgentSnapshot.workspace || "",
