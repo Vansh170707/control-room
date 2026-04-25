@@ -9675,12 +9675,6 @@ function App() {
                   : "max-w-[900px]",
             )}
           >
-            {!hasAgentRuntime && !isChannelsWorkspace && (
-              <div className="rounded-md border border-[#f59e0b]/35 bg-[#3a2a14]/35 px-3 py-2 text-[12px] text-[#fcd9a2]">
-                Runtime actions are disabled until `VITE_AGENT_RUNTIME_URL` is
-                set in `.env.local`.
-              </div>
-            )}
             {workspaceView === "channels" && (
               <div className="mt-2 grid min-h-[780px] grid-cols-1 gap-6 xl:grid-cols-[minmax(0,1fr)_320px]">
                 <div className="flex min-h-[760px] flex-col overflow-hidden rounded-[28px] border border-white/6 bg-[linear-gradient(180deg,rgba(11,18,28,0.92),rgba(8,14,23,0.88))] shadow-[0_18px_48px_rgba(2,6,23,0.14)]">
