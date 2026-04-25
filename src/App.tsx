@@ -5881,31 +5881,15 @@ function App() {
     });
 
     appendAgentMessage(input.agent.id, message);
-
-    const segments = input.text.match(/(\S+\s*|\n+)/g) ?? [input.text];
-    let rendered = "";
-
-    for (const segment of segments) {
-      rendered += segment;
-      updateAgentMessage(input.agent.id, messageId, (current) => ({
-        ...current,
-        content: rendered,
-      }));
-
-      updateLiveActivity(activityId, (entry) => ({
-        ...entry,
-        detail: rendered.slice(-140).trim() || "Typing...",
-      }));
-
-      await new Promise((resolvePromise) =>
-        window.setTimeout(resolvePromise, segment.includes("\n") ? 26 : 18),
-      );
-    }
+    updateAgentMessage(input.agent.id, messageId, (current) => ({
+      ...current,
+      content: input.text,
+    }));
 
     updateLiveActivity(activityId, (entry) => ({
       ...entry,
       status: "completed",
-      detail: "Reply delivered.",
+      detail: input.text.slice(-140).trim() || "Reply delivered.",
       timestamp: new Date().toISOString(),
     }));
 
@@ -5915,14 +5899,14 @@ function App() {
       {
         agentId: input.agent.id,
         role: "assistant",
-        content: rendered,
+        content: input.text,
         sender: input.agent.name,
       },
       totalMessages,
       { source: "assistant_stream" },
     );
 
-    const mentionParse = parseAgentMentions(rendered, input.agent, allAgents);
+    const mentionParse = parseAgentMentions(input.text, input.agent, allAgents);
     mentionParse.signals.forEach((signal) => enqueueHandoff(signal));
   }
 
