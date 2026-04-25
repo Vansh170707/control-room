@@ -8667,33 +8667,40 @@ function App() {
       return;
     }
 
+    const runtimeUnavailableMessage =
+      selectedAgentSnapshot.source === "custom"
+        ? "Local sandbox is not connected. Start the runtime on this computer, then try again."
+        : "This connected agent is not available right now.";
+
     updateLiveActivity(thinkingActivityId, (entry) => ({
       ...entry,
-      status: "completed",
-      detail: "Continuing with a local prototype reply.",
+      status: "failed",
+      detail: runtimeUnavailableMessage,
       timestamp: new Date().toISOString(),
     }));
-
-    await streamAssistantReply({
-      agent: selectedAgentSnapshot,
-      text: generateAgentReply(
-        selectedAgentSnapshot,
-        expandedPrompt,
-        delegations,
-      ),
-      previousThread,
-    });
     updateTaskTree(taskTree.id, (current) => ({
       ...current,
-      status: "completed",
+      status: "blocked",
       updatedAt: new Date().toISOString(),
-      finalSummary: "Completed locally without runtime.",
       nodes: current.nodes.map((node) => ({
         ...node,
-        status: "completed",
+        status: node.kind === "analysis" ? "completed" : "blocked",
         updatedAt: new Date().toISOString(),
       })),
     }));
+
+    setChatError(runtimeUnavailableMessage);
+
+    if (selectedAgentSnapshot.source === "custom") {
+      updateCustomAgent(selectedAgentSnapshot.id, (agent) => ({
+        ...agent,
+        status: "error",
+        currentActivity: "Local sandbox is not connected",
+        lastSeen: new Date().toISOString(),
+      }));
+    }
+
+    finishReplyingForAgent();
   }
 
   async function handleRunCodeBlockInSandbox(input: {
