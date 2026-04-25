@@ -124,7 +124,7 @@ function renderThreadMessage(args: {
   } = args;
 
   if (message.role === "system") {
-    if (message.sender === "Sandbox") {
+    if (message.sender === "Runtime" || message.sender === "Sandbox") {
       return null;
     }
 

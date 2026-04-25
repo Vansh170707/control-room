@@ -401,12 +401,20 @@ function log(message) {
   process.stdout.write(`[runtime] ${message}\n`);
 }
 
-function sendJson(response, statusCode, payload) {
-  response.writeHead(statusCode, {
-    "Content-Type": "application/json",
+function corsHeaders(extraHeaders = {}) {
+  return {
     "Access-Control-Allow-Origin": "*",
     "Access-Control-Allow-Headers": "Content-Type",
     "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
+    "Access-Control-Allow-Private-Network": "true",
+    ...extraHeaders,
+  };
+}
+
+function sendJson(response, statusCode, payload) {
+  response.writeHead(statusCode, {
+    "Content-Type": "application/json",
+    ...corsHeaders(),
   });
   response.end(JSON.stringify(payload));
 }
@@ -415,9 +423,7 @@ function sendBinary(response, statusCode, contentType, buffer) {
   response.writeHead(statusCode, {
     "Content-Type": contentType,
     "Content-Length": Buffer.byteLength(buffer),
-    "Access-Control-Allow-Origin": "*",
-    "Access-Control-Allow-Headers": "Content-Type",
-    "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
+    ...corsHeaders(),
   });
   response.end(buffer);
 }
@@ -486,9 +492,7 @@ function writeNdjsonHeaders(response) {
     "Content-Type": "application/x-ndjson; charset=utf-8",
     "Cache-Control": "no-cache, no-transform",
     Connection: "keep-alive",
-    "Access-Control-Allow-Origin": "*",
-    "Access-Control-Allow-Headers": "Content-Type",
-    "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
+    ...corsHeaders(),
     "X-Accel-Buffering": "no",
   });
 }
@@ -4104,9 +4108,9 @@ const server = createServer(async (request, response) => {
         "Content-Type": "text/event-stream",
         "Cache-Control": "no-cache, no-transform",
         Connection: "keep-alive",
-        "Access-Control-Allow-Origin": "*",
-        "Access-Control-Allow-Headers": "Content-Type",
-        "Access-Control-Allow-Methods": "GET,OPTIONS",
+        ...corsHeaders({
+          "Access-Control-Allow-Methods": "GET,OPTIONS",
+        }),
         "X-Accel-Buffering": "no",
       });
 
