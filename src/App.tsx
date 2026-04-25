@@ -1300,8 +1300,9 @@ function mergeDefaultCustomAgents(agents: WorkspaceAgent[]) {
       ...mergedAgent,
       subtitle: codexStyleBuilderDefaults.subtitle,
       role: codexStyleBuilderDefaults.role,
-      provider: codexStyleBuilderDefaults.provider,
-      model: codexStyleBuilderDefaults.model,
+      provider:
+        existing?.provider?.trim() || codexStyleBuilderDefaults.provider,
+      model: existing?.model?.trim() || codexStyleBuilderDefaults.model,
       objective: codexStyleBuilderDefaults.objective,
       systemPrompt: codexStyleBuilderDefaults.systemPrompt,
       specialties: uniqueStrings([
