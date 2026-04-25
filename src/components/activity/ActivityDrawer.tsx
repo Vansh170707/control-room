@@ -1,14 +1,11 @@
-import React from "react";
-import { motion, AnimatePresence } from "framer-motion";
-import { Terminal, Copy, ExternalLink, Play, Pause, Trash2, FolderOpen, Globe, Github, Server, RefreshCw, Settings2 } from "lucide-react";
+import React, { useEffect, useRef } from "react";
+import { motion } from "framer-motion";
+import { List, Server, Settings2, Terminal, X } from "lucide-react";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
-import { ScrollArea, ScrollBar } from "../ui/scroll-area";
 import { cn } from "@/lib/utils";
-import DOMPurify from "dompurify";
-import { marked } from "marked";
 import { TerminalRenderer } from "./TerminalRenderer";
-import { useAppStore, useChatStore, useAgentStore } from "../../store";
+import { useAppStore } from "../../store";
 
 export function ActivityDrawer({ legacyProps }: { legacyProps: any }) {
   const {
@@ -44,60 +41,132 @@ export function ActivityDrawer({ legacyProps }: { legacyProps: any }) {
 
   const isActivityDrawerOpen = useAppStore(s => s.isActivityDrawerOpen);
   const setIsActivityDrawerOpen = useAppStore(s => s.setIsActivityDrawerOpen);
+  const activityPanelWidth = useAppStore(s => s.activityPanelWidth);
+  const setActivityPanelWidth = useAppStore(s => s.setActivityPanelWidth);
   const activityDrawerTab = useAppStore(s => s.activityDrawerTab);
   const setActivityDrawerTab = useAppStore(s => s.setActivityDrawerTab);
-  const workspaceView = useAppStore(s => s.workspaceView);
+  const isResizingRef = useRef(false);
+
+  useEffect(() => {
+    const handleMouseMove = (event: MouseEvent) => {
+      if (!isResizingRef.current) return;
+      const nextWidth = Math.min(
+        760,
+        Math.max(340, window.innerWidth - event.clientX),
+      );
+      setActivityPanelWidth(nextWidth);
+    };
+
+    const handleMouseUp = () => {
+      if (!isResizingRef.current) return;
+      isResizingRef.current = false;
+      document.body.style.cursor = "";
+      document.body.style.userSelect = "";
+    };
+
+    window.addEventListener("mousemove", handleMouseMove);
+    window.addEventListener("mouseup", handleMouseUp);
+    return () => {
+      window.removeEventListener("mousemove", handleMouseMove);
+      window.removeEventListener("mouseup", handleMouseUp);
+    };
+  }, [setActivityPanelWidth]);
+
+  if (!isActivityDrawerOpen) {
+    return null;
+  }
+
+  const activityCount = currentLiveActivities.length + currentAgentRuns.length;
+  const isRunning =
+    latestAgentRun?.status === "running" ||
+    currentLiveActivities.some((entry: any) => entry.status === "running");
 
   return (
         <motion.aside
           initial={{ x: 32, opacity: 0 }}
           animate={{ x: 0, opacity: 1, transition: { duration: 0.28, ease: [0.22, 1, 0.36, 1] } }}
           exit={{ x: 24, opacity: 0, transition: { duration: 0.2, ease: [0.4, 0, 1, 1] } }}
-          className="relative z-10 hidden w-[320px] shrink-0 flex-col border-l border-white/8 bg-[linear-gradient(180deg,rgba(11,17,25,0.96),rgba(10,16,23,0.92))] xl:flex"
+          className="relative z-10 hidden shrink-0 flex-col border-l border-white/8 bg-[linear-gradient(180deg,rgba(12,18,28,0.98),rgba(10,15,23,0.96))] xl:flex"
+          style={{ width: activityPanelWidth }}
         >
-          <div className="border-b border-white/8 bg-[linear-gradient(180deg,rgba(18,26,37,0.9),rgba(12,18,27,0.8))] px-4 py-4">
+          <button
+            type="button"
+            aria-label="Resize activity panel"
+            onMouseDown={() => {
+              isResizingRef.current = true;
+              document.body.style.cursor = "col-resize";
+              document.body.style.userSelect = "none";
+            }}
+            className="absolute left-0 top-0 h-full w-2 -translate-x-1/2 cursor-col-resize bg-transparent"
+          >
+            <span className="absolute inset-y-0 left-1/2 w-px -translate-x-1/2 bg-white/[0.08] transition-colors hover:bg-[#3b82f6]/50" />
+          </button>
+
+          <div className="border-b border-white/8 bg-[linear-gradient(180deg,rgba(20,27,39,0.96),rgba(14,20,30,0.9))] px-5 py-5">
             <div className="flex items-center justify-between gap-3">
-              <div className="flex items-center gap-2">
-                <Terminal className="h-4 w-4 text-[#8ea0b5]" />
-                <span className="text-[13px] font-semibold text-[#f1f6fb]">
+              <div className="flex items-center gap-3">
+                <List className="h-4 w-4 text-[#8ea0b5]" />
+                <span className="text-[17px] font-semibold tracking-[-0.02em] text-[#f1f6fb]">
                   Activity
+                </span>
+                <span className="inline-flex min-w-[28px] items-center justify-center rounded-md border border-white/8 bg-white/[0.04] px-1.5 py-0.5 text-[11px] text-[#8fa1b3]">
+                  {activityCount}
+                </span>
+                <span
+                  className={cn(
+                    "inline-flex items-center gap-1.5 rounded-full px-3 py-1 text-[11px] font-medium",
+                    isRunning
+                      ? "border border-[#3b82f6]/25 bg-[#1d4ed8]/15 text-[#7fb5ff]"
+                      : "border border-white/8 bg-white/[0.04] text-[#93a4b8]",
+                  )}
+                >
+                  <span
+                    className={cn(
+                      "h-2 w-2 rounded-full",
+                      isRunning ? "bg-[#3b82f6] animate-pulse-dot" : "bg-[#64748b]",
+                    )}
+                  />
+                  {isRunning ? "Running" : "Idle"}
                 </span>
               </div>
               <button
                 type="button"
                 onClick={() => setIsActivityDrawerOpen(false)}
-                className="text-[18px] leading-none text-[#6f8397] transition-colors hover:text-[#edf4f8]"
+                className="inline-flex h-8 w-8 items-center justify-center rounded-xl border border-white/10 bg-white/[0.03] text-[#8fa1b3] transition-colors hover:border-white/16 hover:bg-white/[0.06] hover:text-[#edf4f8]"
               >
-                ×
+                <X className="h-4 w-4" />
               </button>
             </div>
-            <p className="mt-1 text-[11px] text-[#7f93a8]">
-              Open activity for this thread, agent, or channel when you need it.
-            </p>
-            <div className="mt-4 flex items-center border-t border-white/8 pt-3 text-[11px]">
-              <div className="flex rounded-md border border-white/[0.06] bg-white/[0.02] p-0.5">
-                {(["activity", "files", "terminal", "browser"] as const).map(
-                  (tab) => (
-                    <button
-                      key={tab}
-                      type="button"
-                      onClick={() => setActivityDrawerTab(tab)}
+            <div className="mt-5 flex items-center gap-5 border-t border-white/8 pt-3 text-[11px]">
+              {(["activity", "files", "terminal", "browser"] as const).map(
+                (tab) => (
+                  <button
+                    key={tab}
+                    type="button"
+                    onClick={() => setActivityDrawerTab(tab)}
+                    className={cn(
+                      "relative pb-2 text-[13px] capitalize transition-colors",
+                      activityDrawerTab === tab
+                        ? "text-[#edf4f8]"
+                        : "text-[#7d90a5] hover:text-[#dce7f0]",
+                    )}
+                  >
+                    {tab}
+                    <span
                       className={cn(
-                        "rounded px-2.5 py-1 font-medium transition-all duration-200",
+                        "absolute inset-x-0 -bottom-[13px] h-0.5 rounded-full transition-opacity",
                         activityDrawerTab === tab
-                          ? "bg-white/[0.08] text-[#edf4f8] shadow-sm ring-1 ring-inset ring-white/[0.04]"
-                          : "text-[#8ea0b5] hover:bg-white/[0.03] hover:text-[#dce7f0]",
+                          ? "bg-[#3b82f6] opacity-100"
+                          : "bg-transparent opacity-0",
                       )}
-                    >
-                      {tab[0].toUpperCase() + tab.slice(1)}
-                    </button>
-                  ),
-                )}
-              </div>
+                    />
+                  </button>
+                ),
+              )}
             </div>
           </div>
 
-          <div className="flex-1 space-y-4 overflow-y-auto p-4">
+          <div className="flex-1 space-y-4 overflow-y-auto bg-[linear-gradient(180deg,rgba(13,18,28,0.92),rgba(10,15,23,0.96))] p-4">
             {selectedAgent ? (
               <>
                 <div className="rounded-2xl border border-white/6 bg-[linear-gradient(180deg,rgba(18,26,37,0.88),rgba(12,18,27,0.82))] p-4 shadow-none">
@@ -136,7 +205,7 @@ export function ActivityDrawer({ legacyProps }: { legacyProps: any }) {
                   <div className="rounded-xl border border-[#1e252e] bg-[#161b22]/40 overflow-hidden">
                     <div className="px-3 py-2 border-b border-[#1e252e] flex items-center justify-between">
                       <span className="text-[11px] uppercase tracking-wider text-[#8b949e]">
-                        Live Activity
+                        Step-by-step activity
                       </span>
                       <span className="text-[10px] text-[#6e7681]">
                         {currentLiveActivities.length}
@@ -156,7 +225,7 @@ export function ActivityDrawer({ legacyProps }: { legacyProps: any }) {
                           {currentLiveActivities.map((entry: any) => (
                             <motion.div 
                               key={entry.id}
-                              className="px-3 py-2.5 hover:bg-white/[0.02] transition-colors"
+                              className="px-3 py-3 hover:bg-white/[0.02] transition-colors"
                               variants={{
                                 hidden: { y: 8, opacity: 0, filter: "blur(2px)" },
                                 show: { y: 0, opacity: 1, filter: "blur(0px)", transition: { duration: 0.22, ease: [0.22, 1, 0.36, 1] } }
@@ -164,19 +233,15 @@ export function ActivityDrawer({ legacyProps }: { legacyProps: any }) {
                             >
                               <div className="flex items-start justify-between gap-3">
                                 <div className="flex flex-wrap items-center gap-1.5 min-w-0">
-                                  <span
-                                    className={cn(
-                                      "inline-flex h-[18px] items-center rounded border px-1.5 text-[10px] font-medium tracking-wide",
-                                      activityBadgeClasses(entry.kind),
-                                    )}
-                                  >
+                                  <span className="h-2.5 w-2.5 rounded-sm bg-[#22c55e]" />
+                                  <span className="text-[13px] font-medium text-[#dfe8f2]">
                                     {entry.label}
                                   </span>
                                   <span
                                     className={cn(
                                       "text-[10px] font-medium shrink-0",
                                       entry.status === "running"
-                                        ? "text-[#fbbf24]"
+                                        ? "text-[#7fb5ff]"
                                         : entry.status === "completed"
                                           ? "text-[#34d399]"
                                           : entry.status === "failed"
@@ -191,7 +256,7 @@ export function ActivityDrawer({ legacyProps }: { legacyProps: any }) {
                                   {formatRelativeTime(entry.timestamp)}
                                 </span>
                               </div>
-                              <p className="mt-1.5 text-[11px] leading-relaxed text-[#8ea0b5] line-clamp-3 break-words">
+                              <p className="mt-1.5 pl-4 text-[12px] leading-relaxed text-[#8ea0b5] line-clamp-3 break-words">
                                 {entry.detail}
                               </p>
                             </motion.div>
@@ -646,72 +711,19 @@ export function ActivityDrawer({ legacyProps }: { legacyProps: any }) {
             )}
           </div>
 
-          <div className="border-t border-[#1e252e] p-4 space-y-3 bg-[#0d1117]">
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-2">
-                <Server className="h-4 w-4 text-[#8b949e]" />
-                <span className="text-[11px] uppercase tracking-wider text-[#8b949e]">
-                  Workspace Device
+          <div className="border-t border-[#1e252e] bg-[#0d1117] px-4 py-3">
+            <div className="flex items-center gap-2 text-[10px] uppercase tracking-[0.18em] text-[#6e7f93]">
+              <Server className="h-3.5 w-3.5" />
+              Workspace lane
+              {selectedAgent?.workspace ? (
+                <span className="inline-flex items-center gap-1 rounded-full border border-[#10b981]/25 bg-[#10b981]/10 px-2 py-0.5 text-[9px] normal-case tracking-normal text-[#6ee7b7]">
+                  Active
                 </span>
-              </div>
-              {selectedAgent?.workspace && (
-                <Badge variant="emerald">Active</Badge>
-              )}
+              ) : null}
             </div>
-
-            {selectedAgent?.workspace ? (
-              <div className="space-y-2">
-                <div className="rounded-md border border-[#1e252e] bg-[#161b22]/50 p-2">
-                  <p className="text-[11px] text-[#6e7681] truncate">
-                    {selectedAgent.workspace}
-                  </p>
-                  <div className="flex items-center gap-2 mt-1.5">
-                    <div className="w-1.5 h-1.5 rounded-full bg-[#34d399]"></div>
-                    <span className="text-[10px] text-[#34d399]">Running</span>
-                    <span className="text-[10px] text-[#6e7681]">local</span>
-                  </div>
-                </div>
-
-                <div className="flex items-center gap-2 text-[10px] text-[#6e7681]">
-                  <span>
-                    Node {typeof process !== "undefined" ? "" : ""}v20+
-                  </span>
-                  <span>•</span>
-                  <span>{selectedAgent.sandboxMode}</span>
-                  <span>•</span>
-                  <span>
-                    {selectedAgent.permissions.terminal ? "shell" : "no-shell"}
-                  </span>
-                </div>
-
-                <div className="flex flex-wrap gap-1.5">
-                  {selectedAgent.permissions.terminal && (
-                    <span className="inline-flex items-center gap-1 rounded border border-[#10b981]/30 bg-[#10b981]/10 px-1.5 py-0.5 text-[9px] text-[#6ee7b7]">
-                      <Terminal className="h-2.5 w-2.5" /> Terminal
-                    </span>
-                  )}
-                  {selectedAgent.permissions.files && (
-                    <span className="inline-flex items-center gap-1 rounded border border-[#1f6feb]/30 bg-[#1f6feb]/10 px-1.5 py-0.5 text-[9px] text-[#79c0ff]">
-                      <FolderOpen className="h-2.5 w-2.5" /> Files
-                    </span>
-                  )}
-                  {selectedAgent.permissions.git && (
-                    <span className="inline-flex items-center gap-1 rounded border border-[#22c55e]/30 bg-[#22c55e]/10 px-1.5 py-0.5 text-[9px] text-[#86efac]">
-                      <Github className="h-2.5 w-2.5" /> Git
-                    </span>
-                  )}
-                  {selectedAgent.permissions.browser && (
-                    <span className="inline-flex items-center gap-1 rounded border border-[#8b5cf6]/30 bg-[#8b5cf6]/10 px-1.5 py-0.5 text-[9px] text-[#c4b5fd]">
-                      <Globe className="h-2.5 w-2.5" /> Browser
-                    </span>
-                  )}
-                </div>
-              </div>
-            ) : (
-              <p className="text-[11px] text-[#6e7681]">
-                No workspace path configured.
-              </p>
-            )}
+            <p className="mt-2 truncate text-[11px] text-[#8ea0b5]">
+              {selectedAgent?.workspace || "No workspace path configured."}
+            </p>
           </div>
         </motion.aside>
 

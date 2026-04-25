@@ -1,10 +1,7 @@
 import React from "react";
-import { MessageCircle, Orbit, Share2, Workflow } from "lucide-react";
-import { Badge } from "@/components/ui/badge";
+import { MessageCircle, Orbit } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { cn, formatRelativeTime } from "@/lib/utils";
-import { formatRouterIntentLabel } from "@/lib/router";
-import type { ThreadRouteTurn } from "@/store/useRouterStore";
+import { cn } from "@/lib/utils";
 import { ThoughtBubble, splitThoughtFromContent } from "@/components/chat/ThoughtBubble";
 
 interface ThreadMessage {
@@ -41,7 +38,6 @@ interface SelectedAgentLike {
 
 interface ThreadTurnsProps {
   messages: ThreadMessage[];
-  routeTurns: ThreadRouteTurn[];
   selectedAgent?: SelectedAgentLike;
   attachmentLibrary: Record<string, AttachmentLike | undefined>;
   agentPresenceById: Record<string, PresenceInfo | undefined>;
@@ -49,7 +45,6 @@ interface ThreadTurnsProps {
   presenceDotClasses: (tone: PresenceInfo["tone"]) => string;
   presenceTextClasses: (tone: PresenceInfo["tone"]) => string;
   onViewActivity: () => void;
-  onOpenChannel: (channelId: string) => void;
   onRunCodeBlock?: (input: { code: string; language: string }) => void;
 }
 
@@ -141,13 +136,13 @@ function renderThreadMessage(args: {
   }
 
   return (
-    <div key={message.id} className="flex max-w-[820px] gap-3">
+    <div key={message.id} className="flex max-w-[860px] gap-3">
       <div
         className={cn(
-          "mt-1 flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-2xl border text-[11px] font-semibold",
+          "mt-1 flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-2xl border text-[11px] font-semibold shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]",
           isAssistant
-            ? "border-[#3b82f6]/24 bg-[linear-gradient(180deg,rgba(37,99,235,0.9),rgba(29,78,216,0.72))] text-white"
-            : "border-white/8 bg-[#1a2030] text-[#8fa1b3]",
+            ? "border-[#3b82f6]/18 bg-[linear-gradient(180deg,rgba(37,99,235,0.88),rgba(29,78,216,0.66))] text-white"
+            : "border-white/6 bg-white/[0.03] text-[#8fa1b3]",
         )}
       >
         <div className="relative flex h-full w-full items-center justify-center">
@@ -197,10 +192,10 @@ function renderThreadMessage(args: {
         </div>
         <div
           className={cn(
-            "rounded-[22px] border px-4 py-3 text-[14px] leading-relaxed whitespace-pre-wrap shadow-none",
+            "text-[14px] leading-relaxed whitespace-pre-wrap shadow-none",
             isAssistant
-              ? "border-white/6 bg-[linear-gradient(180deg,rgba(17,25,37,0.9),rgba(11,17,26,0.84))] text-[#d7e1ea]"
-              : "border-[#2c3a4c] bg-[linear-gradient(180deg,rgba(12,19,30,0.88),rgba(10,15,23,0.82))] text-[#c2ceda]",
+              ? "px-0 py-1 text-[#d7e1ea]"
+              : "px-0 py-1 text-[#cfd8e3]",
           )}
         >
           {isAssistant ? (() => {
@@ -279,66 +274,8 @@ function renderThreadMessage(args: {
   );
 }
 
-function RouteDecisionCard({
-  turn,
-  onOpenChannel,
-}: {
-  turn: ThreadRouteTurn;
-  onOpenChannel: (channelId: string) => void;
-}) {
-  return (
-    <div className="rounded-[22px] border border-[#38bdf8]/14 bg-[linear-gradient(180deg,rgba(10,22,33,0.96),rgba(9,18,28,0.88))] px-4 py-3">
-      <div className="flex flex-wrap items-center gap-2">
-        <Badge variant="cyan">Router</Badge>
-        <Badge variant={turn.decision.lane === "channel" ? "amber" : "emerald"}>
-          {turn.decision.lane}
-        </Badge>
-        <Badge variant="muted">
-          {formatRouterIntentLabel(turn.decision.intent)}
-        </Badge>
-        <span className="text-[11px] text-[#4f6880]">
-          {formatRelativeTime(turn.createdAt)}
-        </span>
-      </div>
-      <p className="mt-3 text-[13px] leading-relaxed text-[#e6edf3]">
-        {turn.decision.reason}
-      </p>
-      <div className="mt-3 flex flex-wrap items-center gap-2 text-[11px] text-[#8fa1b3]">
-        <span className="inline-flex items-center gap-1.5 rounded-full border border-white/8 bg-white/[0.03] px-2.5 py-1">
-          <Workflow className="h-3.5 w-3.5" />
-          lead {turn.decision.leadAgentId}
-        </span>
-        {turn.decision.collaboratorAgentIds.map((agentId) => (
-          <span
-            key={`${turn.id}-${agentId}`}
-            className="inline-flex items-center rounded-full border border-white/8 bg-white/[0.03] px-2.5 py-1"
-          >
-            @{agentId}
-          </span>
-        ))}
-      </div>
-      <p className="mt-3 text-[12px] leading-relaxed text-[#6e7f93]">
-        {turn.decision.promptExpansion.routingSummary}
-      </p>
-      {turn.openedChannelId ? (
-        <div className="mt-3">
-          <Button
-            variant="secondary"
-            size="sm"
-            onClick={() => onOpenChannel(turn.openedChannelId as string)}
-          >
-            <Share2 className="h-3.5 w-3.5" />
-            Open {turn.openedChannelId}
-          </Button>
-        </div>
-      ) : null}
-    </div>
-  );
-}
-
 export function ThreadTurns({
   messages,
-  routeTurns,
   selectedAgent,
   attachmentLibrary,
   agentPresenceById,
@@ -346,7 +283,6 @@ export function ThreadTurns({
   presenceDotClasses,
   presenceTextClasses,
   onViewActivity,
-  onOpenChannel,
   onRunCodeBlock,
 }: ThreadTurnsProps) {
   const userIndexes = messages.reduce<number[]>((indexes, message, index) => {
@@ -356,10 +292,6 @@ export function ThreadTurns({
     return indexes;
   }, []);
 
-  const routeTurnByUserId = new Map(
-    routeTurns.map((turn) => [turn.userMessageId, turn]),
-  );
-
   const preludeMessages =
     userIndexes.length > 0 ? messages.slice(0, userIndexes[0]) : messages;
 
@@ -368,8 +300,6 @@ export function ThreadTurns({
     const slice = messages.slice(userIndex, nextUserIndex);
     return {
       id: slice[0]?.id || `turn-${turnIndex}`,
-      turnNumber: turnIndex + 1,
-      routeTurn: routeTurnByUserId.get(slice[0]?.id || ""),
       slice,
     };
   });
@@ -390,28 +320,14 @@ export function ThreadTurns({
           onRunCodeBlock,
         }),
       )}
-      {turns.map(({ id, turnNumber, routeTurn, slice }) => (
+      {turns.map(({ id, slice }, turnIndex) => (
         <div
           key={id}
-          className="rounded-[28px] border border-white/8 bg-[linear-gradient(180deg,rgba(12,18,28,0.62),rgba(10,15,23,0.5))] p-4 shadow-[0_12px_36px_rgba(2,6,23,0.12)]"
+          className={cn(
+            "space-y-4",
+            turnIndex > 0 ? "border-t border-white/[0.04] pt-6" : "",
+          )}
         >
-          <div className="mb-4 flex flex-wrap items-center gap-2">
-            <Badge variant="muted">Turn {turnNumber}</Badge>
-            {routeTurn ? (
-              <>
-                <Badge variant="cyan">
-                  {formatRouterIntentLabel(routeTurn.decision.intent)}
-                </Badge>
-                <Badge
-                  variant={
-                    routeTurn.decision.lane === "channel" ? "amber" : "emerald"
-                  }
-                >
-                  {routeTurn.decision.lane}
-                </Badge>
-              </>
-            ) : null}
-          </div>
           <div className="space-y-4">
             {slice[0]
               ? renderThreadMessage({
@@ -427,9 +343,6 @@ export function ThreadTurns({
                   onRunCodeBlock,
                 })
               : null}
-            {routeTurn ? (
-              <RouteDecisionCard turn={routeTurn} onOpenChannel={onOpenChannel} />
-            ) : null}
             {slice.slice(1).map((message) =>
               renderThreadMessage({
                 message,

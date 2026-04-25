@@ -8,6 +8,8 @@ interface AppState {
   setSidebarWidth: (width: number) => void;
   isActivityDrawerOpen: boolean;
   setIsActivityDrawerOpen: (isOpen: boolean) => void;
+  activityPanelWidth: number;
+  setActivityPanelWidth: (width: number) => void;
   activityDrawerTab: "activity" | "files" | "terminal" | "browser";
   setActivityDrawerTab: (tab: "activity" | "files" | "terminal" | "browser") => void;
   isCreateAgentOpen: boolean;
@@ -42,8 +44,11 @@ export const useAppStore = create<AppState>((set) => ({
   sidebarWidth: 260,
   setSidebarWidth: (width) => set({ sidebarWidth: width }),
   
-  isActivityDrawerOpen: false,
+  isActivityDrawerOpen: true,
   setIsActivityDrawerOpen: (isOpen) => set({ isActivityDrawerOpen: isOpen }),
+
+  activityPanelWidth: 420,
+  setActivityPanelWidth: (width) => set({ activityPanelWidth: width }),
   
   activityDrawerTab: "activity",
   setActivityDrawerTab: (tab) => set({ activityDrawerTab: tab }),

@@ -22,7 +22,7 @@ export function ThoughtBubble({ thought, defaultOpen = false, className }: Thoug
     <div className={cn("mb-2 select-none", className)}>
       <button
         onClick={() => setOpen((v) => !v)}
-        className="flex items-center gap-1.5 rounded-full border border-white/8 bg-white/[0.025] px-2.5 py-1 text-[11px] text-[#6e7a88] transition-colors hover:border-white/12 hover:text-[#8fa1b3]"
+        className="flex items-center gap-1.5 rounded-full bg-white/[0.025] px-2.5 py-1 text-[11px] text-[#6e7a88] transition-colors hover:bg-white/[0.04] hover:text-[#8fa1b3]"
       >
         <Brain className="h-3 w-3 flex-shrink-0 text-violet-400/70" />
         <span className="font-medium">Thought</span>
@@ -34,7 +34,7 @@ export function ThoughtBubble({ thought, defaultOpen = false, className }: Thoug
       </button>
 
       {open && (
-        <div className="mt-1.5 ml-2 rounded-xl border border-violet-500/12 bg-violet-500/[0.04] px-3.5 py-2.5">
+        <div className="mt-1.5 ml-2 rounded-xl bg-violet-500/[0.04] px-3.5 py-2.5">
           <p className="whitespace-pre-wrap font-mono text-[11px] leading-relaxed text-[#7f8fa3]">
             {thought}
           </p>

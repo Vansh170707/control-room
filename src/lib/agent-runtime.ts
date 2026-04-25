@@ -249,6 +249,16 @@ const runtimeBaseUrl = import.meta.env.VITE_AGENT_RUNTIME_URL?.replace(/\/$/, ""
 
 export const hasAgentRuntime = Boolean(runtimeBaseUrl);
 
+function formatRuntimeFetchError(error: unknown, fallback: string) {
+  if (error instanceof TypeError && error.message === "Failed to fetch") {
+    return runtimeBaseUrl
+      ? `Local runtime is not reachable at ${runtimeBaseUrl}. Start it with npm run runtime:dev, then try again.`
+      : "Agent runtime URL is not configured.";
+  }
+
+  return error instanceof Error ? error.message : fallback;
+}
+
 export function getRuntimeFileViewUrl(filePath: string) {
   if (!hasAgentRuntime || !filePath.trim()) {
     return "";
@@ -278,7 +288,7 @@ export async function getAgentRuntimeHealth(): Promise<RuntimeHealth> {
   } catch (error) {
     return {
       ok: false,
-      error: error instanceof Error ? error.message : "Runtime health check failed",
+      error: formatRuntimeFetchError(error, "Runtime health check failed"),
     };
   }
 }
@@ -305,7 +315,7 @@ export async function createBrowserUseSession(input: {
   } catch (error) {
     return {
       ok: false,
-      error: error instanceof Error ? error.message : "Failed to create Browser Use session.",
+      error: formatRuntimeFetchError(error, "Failed to create Browser Use session."),
     };
   }
 }
@@ -321,7 +331,7 @@ export async function listBrowserUseSessions(): Promise<{ ok: boolean; sessions?
   } catch (error) {
     return {
       ok: false,
-      error: error instanceof Error ? error.message : "Failed to list Browser Use sessions.",
+      error: formatRuntimeFetchError(error, "Failed to list Browser Use sessions."),
     };
   }
 }
@@ -337,7 +347,7 @@ export async function getBrowserUseSession(sessionId: string): Promise<{ ok: boo
   } catch (error) {
     return {
       ok: false,
-      error: error instanceof Error ? error.message : "Failed to fetch Browser Use session.",
+      error: formatRuntimeFetchError(error, "Failed to fetch Browser Use session."),
     };
   }
 }
@@ -355,7 +365,7 @@ export async function stopBrowserUseSession(sessionId: string): Promise<{ ok: bo
   } catch (error) {
     return {
       ok: false,
-      error: error instanceof Error ? error.message : "Failed to stop Browser Use session.",
+      error: formatRuntimeFetchError(error, "Failed to stop Browser Use session."),
     };
   }
 }
@@ -403,7 +413,7 @@ export async function sendAgentRuntimeChat(input: {
   } catch (error) {
     return {
       ok: false,
-      error: error instanceof Error ? error.message : "Runtime chat request failed",
+      error: formatRuntimeFetchError(error, "Runtime chat request failed"),
     };
   }
 }
@@ -431,7 +441,7 @@ export async function executeAgentRuntimeCommand(input: {
   } catch (error) {
     return {
       ok: false,
-      error: error instanceof Error ? error.message : "Runtime execute request failed",
+      error: formatRuntimeFetchError(error, "Runtime execute request failed"),
     };
   }
 }
@@ -545,7 +555,7 @@ export async function executeAgentRuntimeCommandStream(
   } catch (error) {
     return {
       ok: false,
-      error: error instanceof Error ? error.message : "Runtime execute stream request failed",
+      error: formatRuntimeFetchError(error, "Runtime execute stream request failed"),
     };
   }
 }
@@ -573,7 +583,7 @@ export async function listAgentRuntimeRuns(input?: {
   } catch (error) {
     return {
       ok: false,
-      error: error instanceof Error ? error.message : "Failed to list runtime runs.",
+      error: formatRuntimeFetchError(error, "Failed to list runtime runs."),
     };
   }
 }
@@ -591,7 +601,7 @@ export async function getAgentRuntimeRun(
   } catch (error) {
     return {
       ok: false,
-      error: error instanceof Error ? error.message : "Failed to fetch runtime run.",
+      error: formatRuntimeFetchError(error, "Failed to fetch runtime run."),
     };
   }
 }
@@ -616,7 +626,7 @@ export async function cancelAgentRuntimeRun(
   } catch (error) {
     return {
       ok: false,
-      error: error instanceof Error ? error.message : "Failed to cancel runtime run.",
+      error: formatRuntimeFetchError(error, "Failed to cancel runtime run."),
     };
   }
 }
@@ -639,7 +649,7 @@ export async function startGithubCopilotDeviceAuth(): Promise<RuntimeGithubDevic
   } catch (error) {
     return {
       ok: false,
-      error: error instanceof Error ? error.message : "Failed to start GitHub device auth.",
+      error: formatRuntimeFetchError(error, "Failed to start GitHub device auth."),
     };
   }
 }
@@ -664,7 +674,7 @@ export async function pollGithubCopilotDeviceAuth(
   } catch (error) {
     return {
       ok: false,
-      error: error instanceof Error ? error.message : "Failed to poll GitHub device auth.",
+      error: formatRuntimeFetchError(error, "Failed to poll GitHub device auth."),
     };
   }
 }
@@ -687,7 +697,7 @@ export async function logoutGithubCopilotAuth(): Promise<{ ok: boolean; error?: 
   } catch (error) {
     return {
       ok: false,
-      error: error instanceof Error ? error.message : "Failed to clear GitHub auth.",
+      error: formatRuntimeFetchError(error, "Failed to clear GitHub auth."),
     };
   }
 }
@@ -765,7 +775,7 @@ export async function retryRun(
   } catch (error) {
     return {
       ok: false,
-      error: error instanceof Error ? error.message : "Failed to retry run.",
+      error: formatRuntimeFetchError(error, "Failed to retry run."),
     };
   }
 }
@@ -788,7 +798,7 @@ export async function resumeRun(
   } catch (error) {
     return {
       ok: false,
-      error: error instanceof Error ? error.message : "Failed to resume run.",
+      error: formatRuntimeFetchError(error, "Failed to resume run."),
     };
   }
 }
@@ -806,7 +816,7 @@ export async function getRunTimeline(
   } catch (error) {
     return {
       ok: false,
-      error: error instanceof Error ? error.message : "Failed to get run timeline.",
+      error: formatRuntimeFetchError(error, "Failed to get run timeline."),
     };
   }
 }
