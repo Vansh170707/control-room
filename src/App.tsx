@@ -827,7 +827,30 @@ const builtInSkillCatalog: Array<{
 const providerPresets = [
   { label: "OpenAI", provider: "OpenAI", model: "gpt-4.1" },
   { label: "Anthropic", provider: "Anthropic", model: "claude-3-7-sonnet" },
-  { label: "Gemini", provider: "Gemini", model: "gemini-2.5-flash" },
+  {
+    label: "Gemini",
+    provider: "Gemini",
+    model: "gemini-2.5-flash",
+    displayModel: "Gemini 2.5 Flash",
+  },
+  {
+    label: "Gemini",
+    provider: "Gemini",
+    model: "gemini-2.5-pro",
+    displayModel: "Gemini 2.5 Pro",
+  },
+  {
+    label: "Gemini",
+    provider: "Gemini",
+    model: "gemini-3-flash",
+    displayModel: "Gemini 3 Flash",
+  },
+  {
+    label: "Gemini",
+    provider: "Gemini",
+    model: "gemini-3.1-pro",
+    displayModel: "Gemini 3.1 Pro",
+  },
   { label: "Groq", provider: "Groq", model: "llama-3.3-70b-versatile" },
   {
     label: "OpenRouter",
