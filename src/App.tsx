@@ -842,14 +842,14 @@ const providerPresets = [
   {
     label: "Gemini",
     provider: "Gemini",
-    model: "gemini-3-flash",
-    displayModel: "Gemini 3 Flash",
+    model: "gemini-3-flash-preview",
+    displayModel: "Gemini 3 Flash Preview",
   },
   {
     label: "Gemini",
     provider: "Gemini",
-    model: "gemini-3.1-pro",
-    displayModel: "Gemini 3.1 Pro",
+    model: "gemini-3.1-pro-preview",
+    displayModel: "Gemini 3.1 Pro Preview",
   },
   { label: "Groq", provider: "Groq", model: "llama-3.3-70b-versatile" },
   {

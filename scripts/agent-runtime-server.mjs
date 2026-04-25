@@ -742,9 +742,29 @@ const copilotModelAliases = new Map([
   ["goldeneye", "goldeneye"],
 ]);
 
+const geminiModelAliases = new Map([
+  ["gemini 3 flash", "gemini-3-flash-preview"],
+  ["gemini-3-flash", "gemini-3-flash-preview"],
+  ["gemini 3 flash preview", "gemini-3-flash-preview"],
+  ["gemini-3-flash-preview", "gemini-3-flash-preview"],
+  ["gemini 3 pro", "gemini-3-pro-preview"],
+  ["gemini-3-pro", "gemini-3-pro-preview"],
+  ["gemini 3 pro preview", "gemini-3-pro-preview"],
+  ["gemini-3-pro-preview", "gemini-3-pro-preview"],
+  ["gemini 3.1 pro", "gemini-3.1-pro-preview"],
+  ["gemini-3.1-pro", "gemini-3.1-pro-preview"],
+  ["gemini 3.1 pro preview", "gemini-3.1-pro-preview"],
+  ["gemini-3.1-pro-preview", "gemini-3.1-pro-preview"],
+]);
+
 function normalizeCopilotModelId(model = "") {
   const normalized = `${model}`.trim().toLowerCase();
   return copilotModelAliases.get(normalized) || normalized;
+}
+
+function normalizeGeminiModelId(model = "") {
+  const normalized = `${model}`.trim().toLowerCase().replace(/^models\//, "");
+  return geminiModelAliases.get(normalized) || normalized;
 }
 
 function isGitHubModelsCompatibleFallbackModel(model = "") {
@@ -1235,9 +1255,10 @@ async function callGemini(agent, conversation) {
   if (!apiKey) {
     throw new Error("GEMINI_API_KEY is missing in the local runtime environment.");
   }
+  const modelId = normalizeGeminiModelId(agent.model);
 
   const response = await fetch(
-    `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(agent.model)}:generateContent`,
+    `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(modelId)}:generateContent`,
     {
       method: "POST",
       headers: {
