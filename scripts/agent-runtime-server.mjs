@@ -767,6 +767,19 @@ function normalizeGeminiModelId(model = "") {
   return geminiModelAliases.get(normalized) || normalized;
 }
 
+function getGeminiEmptyResponseFallbackModel(model = "") {
+  const normalized = normalizeGeminiModelId(model);
+
+  if (
+    normalized.includes("-preview") ||
+    normalized.startsWith("gemini-3")
+  ) {
+    return "gemini-2.5-pro";
+  }
+
+  return null;
+}
+
 function isGitHubModelsCompatibleFallbackModel(model = "") {
   const normalized = normalizeCopilotModelId(model);
 
@@ -1076,6 +1089,25 @@ function extractGeminiText(payload) {
     .join("\n\n");
 }
 
+function describeGeminiEmptyResponse(payload) {
+  const candidate = Array.isArray(payload?.candidates) ? payload.candidates[0] : null;
+  const finishReason = candidate?.finishReason;
+  const safetyRatings = Array.isArray(candidate?.safetyRatings)
+    ? candidate.safetyRatings
+        .map((rating) => `${rating.category || "unknown"}:${rating.probability || "unknown"}`)
+        .join(", ")
+    : "";
+  const blockReason = payload?.promptFeedback?.blockReason;
+
+  return [
+    blockReason ? `blockReason=${blockReason}` : "",
+    finishReason ? `finishReason=${finishReason}` : "",
+    safetyRatings ? `safety=${safetyRatings}` : "",
+  ]
+    .filter(Boolean)
+    .join("; ");
+}
+
 function buildOpenAICompatibleMessages(agent, conversation) {
   return [
     { role: "system", content: buildSystemPrompt(agent) },
@@ -1256,44 +1288,69 @@ async function callGemini(agent, conversation) {
     throw new Error("GEMINI_API_KEY is missing in the local runtime environment.");
   }
   const modelId = normalizeGeminiModelId(agent.model);
-
-  const response = await fetch(
-    `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(modelId)}:generateContent`,
-    {
-      method: "POST",
-      headers: {
-        "x-goog-api-key": apiKey,
-        "Content-Type": "application/json",
+  const requestGeminiModel = async (nextModelId) => {
+    const response = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(nextModelId)}:generateContent`,
+      {
+        method: "POST",
+        headers: {
+          "x-goog-api-key": apiKey,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          system_instruction: {
+            parts: [
+              {
+                text: buildSystemPrompt(agent),
+              },
+            ],
+          },
+          contents: buildGeminiContents(conversation),
+          generationConfig: {
+            maxOutputTokens: 4096,
+          },
+        }),
       },
-      body: JSON.stringify({
-        system_instruction: {
-          parts: [
-            {
-              text: buildSystemPrompt(agent),
-            },
-          ],
-        },
-        contents: buildGeminiContents(conversation),
-        generationConfig: {
-          maxOutputTokens: 1200,
-        },
-      }),
-    },
-  );
+    );
 
-  if (!response.ok) {
-    throw new Error(`Gemini error: ${await parseErrorResponse(response)}`);
-  }
+    if (!response.ok) {
+      throw new Error(`Gemini error: ${await parseErrorResponse(response)}`);
+    }
 
-  const payload = await response.json();
-  const text = extractGeminiText(payload);
+    const payload = await response.json();
+    return {
+      payload,
+      text: extractGeminiText(payload),
+    };
+  };
+
+  let { payload, text } = await requestGeminiModel(modelId);
 
   if (!text) {
     const blockReason = payload?.promptFeedback?.blockReason;
+    const emptyDetails = describeGeminiEmptyResponse(payload);
+    const fallbackModel = blockReason
+      ? null
+      : getGeminiEmptyResponseFallbackModel(modelId);
+
+    if (fallbackModel && fallbackModel !== modelId) {
+      const fallback = await requestGeminiModel(fallbackModel);
+      payload = fallback.payload;
+      text = fallback.text;
+    }
+
+    if (text) {
+      return {
+        text,
+        usage: payload.usageMetadata ?? null,
+        provider: "gemini",
+      };
+    }
+
     throw new Error(
       blockReason
         ? `Gemini blocked the prompt: ${blockReason}`
-        : "Gemini returned an empty response.",
+        : `Gemini returned an empty response${emptyDetails ? ` (${emptyDetails})` : ""}.`,
     );
   }
 
