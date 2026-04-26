@@ -3195,7 +3195,10 @@ function App() {
     Record<string, ComposerAttachment>
   >({});
   const workspacePersistenceReadyRef = useRef(false);
+  const chatScrollAreaRef = useRef<HTMLDivElement | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const isChatPinnedToBottomRef = useRef(true);
+  const lastAutoScrolledAgentIdRef = useRef<string | null>(null);
   const isResizingSidebarRef = useRef(false);
   const chatFileInputRef = useRef<HTMLInputElement>(null);
   const channelFileInputRef = useRef<HTMLInputElement>(null);
@@ -3597,9 +3600,58 @@ function App() {
     };
   }
 
+  function getChatScrollViewport() {
+    return chatScrollAreaRef.current?.querySelector<HTMLElement>(
+      "[data-radix-scroll-area-viewport]",
+    );
+  }
+
+  function isChatScrollNearBottom(viewport: HTMLElement) {
+    return viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight < 120;
+  }
+
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messagesByAgent, selectedAgentId, replyingAgentId]);
+    if (workspaceView !== "chat") {
+      return;
+    }
+
+    const viewport = getChatScrollViewport();
+    if (!viewport) {
+      return;
+    }
+
+    const updatePinnedState = () => {
+      isChatPinnedToBottomRef.current = isChatScrollNearBottom(viewport);
+    };
+
+    updatePinnedState();
+    viewport.addEventListener("scroll", updatePinnedState, { passive: true });
+
+    return () => {
+      viewport.removeEventListener("scroll", updatePinnedState);
+    };
+  }, [selectedAgentId, workspaceView]);
+
+  useEffect(() => {
+    if (workspaceView !== "chat") {
+      return;
+    }
+
+    const agentChanged = lastAutoScrolledAgentIdRef.current !== selectedAgentId;
+    if (agentChanged) {
+      lastAutoScrolledAgentIdRef.current = selectedAgentId;
+      isChatPinnedToBottomRef.current = true;
+    }
+
+    if (!agentChanged && !isChatPinnedToBottomRef.current) {
+      return;
+    }
+
+    messagesEndRef.current?.scrollIntoView({
+      behavior: agentChanged ? "auto" : "smooth",
+      block: "end",
+    });
+  }, [messagesByAgent, selectedAgentId, replyingAgentId, workspaceView]);
 
   const workspaceSyncSignatureRef = useRef({
     customAgents: "",
@@ -9774,7 +9826,7 @@ function App() {
         </AnimatePresence>
 
         {/* Thread View */}
-        <ScrollArea className="flex-1 px-6 py-6">
+        <ScrollArea ref={chatScrollAreaRef} className="flex-1 px-6 py-6">
           <div
             className={cn(
               "mx-auto flex flex-col gap-6 pb-36",
