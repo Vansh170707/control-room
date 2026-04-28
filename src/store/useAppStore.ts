@@ -35,6 +35,9 @@ interface AppState {
 
   isAgentDropdownOpen: boolean;
   setIsAgentDropdownOpen: (isOpen: boolean) => void;
+
+  isMobileSidebarOpen: boolean;
+  setIsMobileSidebarOpen: (isOpen: boolean) => void;
 }
 
 export const useAppStore = create<AppState>((set) => ({
@@ -82,4 +85,7 @@ export const useAppStore = create<AppState>((set) => ({
 
   isAgentDropdownOpen: false,
   setIsAgentDropdownOpen: (isOpen) => set({ isAgentDropdownOpen: isOpen }),
+
+  isMobileSidebarOpen: false,
+  setIsMobileSidebarOpen: (isOpen) => set({ isMobileSidebarOpen: isOpen }),
 }));

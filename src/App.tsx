@@ -24,6 +24,7 @@ import {
   ShieldCheck,
   Sparkles,
   Terminal,
+  Trash2,
   Users2,
   Workflow,
   X,
@@ -140,6 +141,7 @@ import {
   type Automation,
   type AutomationRun,
 } from "@/lib/automations";
+import { issueAgentCommand } from "@/lib/commands";
 
 import { Sidebar } from "./components/layout/Sidebar";
 import { TopBanner } from "./components/layout/TopBanner";
@@ -376,8 +378,25 @@ export interface ExecutionStepResult {
   };
 }
 
+interface BridgeCommandRow {
+  id: string;
+  status: "pending" | "dispatched" | "running" | "completed" | "failed" | "canceled";
+  result?: {
+    exitCode?: number;
+    stdout?: string;
+    stderr?: string;
+    timedOut?: boolean;
+    durationMs?: number;
+    cwd?: string;
+    error?: string;
+    artifacts?: RuntimeArtifact[] | null;
+  } | null;
+  updated_at?: string;
+}
+
 type CommandExecutionRequestResult =
   | { status: "completed"; result: RuntimeExecuteResult }
+  | { status: "queued"; result: RuntimeExecuteResult }
   | { status: "waiting_for_approval" }
   | { status: "blocked" };
 
@@ -476,6 +495,8 @@ const STORAGE_KEYS = {
 } as const;
 
 const PERSONAL_WORKSPACE_ID = "default";
+const CONVERSATION_RESET_VERSION = "2026-04-27-fresh-agent-chats";
+const STORAGE_MAINTENANCE_VERSION = "2026-04-27-fresh-agent-chats";
 
 const blockedCommandPatterns = [
   /\brm\s+-rf\s+\/\b/i,
@@ -507,6 +528,7 @@ const readOnlyCommands = new Set([
 ]);
 
 const shellRiskPattern = /[|;&><`$]/;
+const TRUSTED_PERSONAL_TERMINAL_ACCESS = true;
 
 const commandApprovalPatterns = [
   {
@@ -637,6 +659,18 @@ const viewItems: Array<{
 ];
 
 const DEFAULT_AGENT_WORKSPACE = "/Users/vanshsehrawat";
+const CLOUD_BRIDGE_AGENT_ID =
+  import.meta.env.VITE_CLOUD_BRIDGE_AGENT_ID?.trim() || "alpha";
+const CLOUD_BRIDGE_INGEST_SECRET =
+  import.meta.env.VITE_CLOUD_BRIDGE_INGEST_SECRET?.trim() || "";
+const CLOUD_BRIDGE_SECRET_STORAGE_KEY = "clawbuddy-ingest-secret";
+const isLocalBrowserOrigin = () => {
+  if (typeof window === "undefined") {
+    return false;
+  }
+
+  return ["localhost", "127.0.0.1", "::1"].includes(window.location.hostname);
+};
 const CONTROL_ROOM_ROOT = "/Users/vanshsehrawat/Desktop/control room";
 const PDF_RESUME_GENERATOR_PATH = `${CONTROL_ROOM_ROOT}/scripts/generate_resume_pdf.py`;
 const LEGACY_DEFAULT_WORKSPACES = new Set([
@@ -1254,9 +1288,22 @@ const defaultCustomAgents: WorkspaceAgent[] = [
 ];
 
 function mergeDefaultCustomAgents(agents: WorkspaceAgent[]) {
+  const settleStartupAgent = (agent: WorkspaceAgent): WorkspaceAgent =>
+    agent.status === "active"
+      ? {
+          ...agent,
+          status: "idle",
+          currentActivity: "Ready in the thread workspace",
+        }
+      : agent;
   const storedById = new Map(agents.map((agent) => [agent.id, agent]));
   const builtIns = defaultCustomAgents.map((defaultAgent) => {
     const existing = storedById.get(defaultAgent.id);
+    const shouldRestorePreviousRoute =
+      existing !== undefined &&
+      existing.provider === "GitHub" &&
+      existing.model === "openai/gpt-4.1" &&
+      defaultAgent.provider !== "GitHub";
 
     if (!existing) {
       return defaultAgent;
@@ -1292,17 +1339,25 @@ function mergeDefaultCustomAgents(agents: WorkspaceAgent[]) {
           : defaultAgent.skills,
     };
 
-    if (defaultAgent.id !== BUILDER_AGENT_ID) {
-      return mergedAgent;
+    if (shouldRestorePreviousRoute) {
+      mergedAgent.provider = defaultAgent.provider;
+      mergedAgent.model = defaultAgent.model;
     }
 
-    return {
+    if (defaultAgent.id !== BUILDER_AGENT_ID) {
+      return settleStartupAgent(mergedAgent);
+    }
+
+    return settleStartupAgent({
       ...mergedAgent,
       subtitle: codexStyleBuilderDefaults.subtitle,
       role: codexStyleBuilderDefaults.role,
-      provider:
-        existing?.provider?.trim() || codexStyleBuilderDefaults.provider,
-      model: existing?.model?.trim() || codexStyleBuilderDefaults.model,
+      provider: shouldRestorePreviousRoute
+        ? codexStyleBuilderDefaults.provider
+        : existing?.provider?.trim() || codexStyleBuilderDefaults.provider,
+      model: shouldRestorePreviousRoute
+        ? codexStyleBuilderDefaults.model
+        : existing?.model?.trim() || codexStyleBuilderDefaults.model,
       objective: codexStyleBuilderDefaults.objective,
       systemPrompt: codexStyleBuilderDefaults.systemPrompt,
       specialties: uniqueStrings([
@@ -1322,7 +1377,7 @@ function mergeDefaultCustomAgents(agents: WorkspaceAgent[]) {
         ...permissions,
         ...codexStyleBuilderDefaults.permissions,
       },
-    };
+    });
   });
 
   const extras = agents
@@ -1333,7 +1388,7 @@ function mergeDefaultCustomAgents(agents: WorkspaceAgent[]) {
         ),
     )
     .map((agent) => ({
-      ...agent,
+      ...settleStartupAgent(agent),
       workspace: resolveWorkspacePath(agent.workspace),
     }));
   return [...builtIns, ...extras];
@@ -1830,6 +1885,40 @@ function groupWorkspaceMessages(rows: WorkspaceMessageRow[]) {
   return grouped;
 }
 
+function mergeMessagesByAgent(
+  localMessagesByAgent: Record<string, ChatMessage[]>,
+  remoteMessagesByAgent: Record<string, ChatMessage[]>,
+) {
+  const agentIds = new Set([
+    ...Object.keys(localMessagesByAgent),
+    ...Object.keys(remoteMessagesByAgent),
+  ]);
+  const merged: Record<string, ChatMessage[]> = {};
+
+  agentIds.forEach((agentId) => {
+    const byId = new Map<string, ChatMessage>();
+
+    for (const message of localMessagesByAgent[agentId] ?? []) {
+      byId.set(message.id, message);
+    }
+
+    for (const message of remoteMessagesByAgent[agentId] ?? []) {
+      byId.set(message.id, {
+        ...byId.get(message.id),
+        ...message,
+      });
+    }
+
+    merged[agentId] = Array.from(byId.values()).sort(
+      (left, right) =>
+        left.timestamp.localeCompare(right.timestamp) ||
+        left.id.localeCompare(right.id),
+    );
+  });
+
+  return merged;
+}
+
 function isCannedAgentSetupMessage(message: Pick<ChatMessage, "id" | "content" | "role">) {
   return (
     (message.role === "system" &&
@@ -2047,6 +2136,19 @@ function runIsInFlight(status?: string | null) {
   );
 }
 
+const STALE_IN_FLIGHT_RUN_MS = 30 * 60 * 1000;
+
+function runCountsAsInFlight(run: CommandRun) {
+  if (!runIsInFlight(run.status)) {
+    return false;
+  }
+
+  const startedAt = Date.parse(run.createdAt);
+  return Number.isNaN(startedAt)
+    ? true
+    : Date.now() - startedAt < STALE_IN_FLIGHT_RUN_MS;
+}
+
 function runNeedsAttention(status?: string | null) {
   return status === "failed" || status === "blocked" || status === "canceled";
 }
@@ -2210,7 +2312,7 @@ function buildAttachmentContext(attachments: ComposerAttachment[]) {
       if (attachment.kind === "text" && attachment.textContent) {
         return [
           `${index + 1}. ${attachment.name} (${attachment.mimeType || "text"})`,
-          attachment.textContent,
+          truncateText(attachment.textContent, 5000),
         ].join("\n");
       }
 
@@ -2236,6 +2338,183 @@ function hasImageAttachments(attachments: ComposerAttachment[]) {
     (attachment) =>
       attachment.kind === "image" && typeof attachment.previewUrl === "string",
   );
+}
+
+function shouldConsiderSandboxExecution(prompt: string) {
+  return /\b(create|make|write|save|export|edit|modify|delete|rename|move|copy|terminal|command|shell|run|execute|install|build|test|debug|fix|folder|directory|file|pdf|docx|csv|json|script|repo|git|read|inspect|check|list|open)\b/i.test(
+    prompt,
+  );
+}
+
+function cleanRequestedPathName(value: string) {
+  return value
+    .replace(/\s+(?:please|thanks|thank you)$/i, "")
+    .replace(/[.?!]+$/g, "")
+    .trim()
+    .replace(/[/:]/g, "-")
+    .replace(/\s+/g, " ");
+}
+
+function slugifyFileStem(value: string) {
+  const slug = cleanRequestedPathName(value)
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  return slug || "notes";
+}
+
+function inferRecentLocalDirectory(
+  messages: Array<Pick<ChatMessage, "content" | "contextText">> = [],
+) {
+  const pathPattern = /\/Users\/vanshsehrawat\/[^\n`]+/g;
+  for (const message of [...messages].reverse()) {
+    const text = `${message.contextText ?? ""}\n${message.content ?? ""}`;
+    const matches = text.match(pathPattern) ?? [];
+    for (const rawPath of matches.reverse()) {
+      const cleaned = rawPath
+        .replace(/[),.;\]]+$/g, "")
+        .replace(/^['"`]+|['"`]+$/g, "")
+        .trim();
+      if (!cleaned) {
+        continue;
+      }
+      return /\.[a-z0-9]{1,8}$/i.test(cleaned)
+        ? cleaned.replace(/\/[^/]+$/, "")
+        : cleaned;
+    }
+  }
+  return "";
+}
+
+function buildSimpleTextFileContent(topic: string, prompt: string) {
+  const title = cleanRequestedPathName(topic || "Notes");
+  return [
+    title,
+    "",
+    `This text file was created from the request: ${prompt.trim()}`,
+    "",
+    topic
+      ? `${title} is the subject requested for this note. You can edit or expand this file whenever you want.`
+      : "You can edit or expand this file whenever you want.",
+    "",
+  ].join("\n");
+}
+
+function buildDeterministicLocalCommand(
+  prompt: string,
+  previousThread: Array<Pick<ChatMessage, "content" | "contextText">> = [],
+) {
+  if (
+    /\b(?:create|make)\b/i.test(prompt) &&
+    /\b(?:folder|directory)\b/i.test(prompt)
+  ) {
+    const nameMatch =
+      prompt.match(/\b(?:named|called)\s+["'`]?(.+?)["'`]?\s*$/i) ??
+      prompt.match(/\b(?:folder|directory)\s+["'`]?([^"'`]+?)["'`]?\s*$/i);
+    const requestedName = cleanRequestedPathName(nameMatch?.[1] ?? "");
+    if (!requestedName) {
+      return null;
+    }
+
+    const basePath = /\bdesktop\b/i.test(prompt)
+      ? `${DEFAULT_AGENT_WORKSPACE}/Desktop`
+      : /\bsame folder\b/i.test(prompt)
+        ? inferRecentLocalDirectory(previousThread) || DEFAULT_AGENT_WORKSPACE
+        : DEFAULT_AGENT_WORKSPACE;
+    const targetPath = `${basePath}/${requestedName}`;
+
+    return {
+      kind: "create_folder" as const,
+      targetPath,
+      command: [
+        `mkdir -p ${shellQuote(targetPath)}`,
+        `test -d ${shellQuote(targetPath)}`,
+        `printf ${shellQuote(`CREATED ${targetPath}\n`)}`,
+      ].join(" && "),
+      cwd: basePath,
+      reasoning: `Create and verify the requested folder at ${targetPath}.`,
+    };
+  }
+
+  if (
+    /\b(?:create|make|write|generate|save)\b/i.test(prompt) &&
+    /\b(?:txt|text file|\.txt|file)\b/i.test(prompt)
+  ) {
+    const topic =
+      cleanRequestedPathName(
+        prompt.match(/\b(?:about|describing|explaining)\s+(.+?)$/i)?.[1] ?? "",
+      ) || "notes";
+    const explicitName = cleanRequestedPathName(
+      prompt.match(/\b(?:named|called)\s+["'`]?(.+?)["'`]?\s*$/i)?.[1] ?? "",
+    );
+    const fileName = /\.[a-z0-9]{1,8}$/i.test(explicitName)
+      ? explicitName
+      : `${slugifyFileStem(explicitName || topic)}.txt`;
+    const basePath = /\bdesktop\b/i.test(prompt)
+      ? `${DEFAULT_AGENT_WORKSPACE}/Desktop`
+      : /\bsame folder\b/i.test(prompt)
+        ? inferRecentLocalDirectory(previousThread) || DEFAULT_AGENT_WORKSPACE
+        : DEFAULT_AGENT_WORKSPACE;
+    const targetPath = `${basePath}/${fileName}`;
+    const content = buildSimpleTextFileContent(topic, prompt);
+
+    return {
+      kind: "create_text_file" as const,
+      targetPath,
+      command: [
+        `mkdir -p ${shellQuote(basePath)}`,
+        `printf %s ${shellQuote(content)} > ${shellQuote(targetPath)}`,
+        `test -f ${shellQuote(targetPath)}`,
+        `printf ${shellQuote(`CREATED ${targetPath}\n`)}`,
+      ].join(" && "),
+      cwd: basePath,
+      reasoning: `Create and verify the requested text file at ${targetPath}.`,
+    };
+  }
+
+  return null;
+}
+
+function formatDeterministicCommandReply(input: {
+  plan: NonNullable<ReturnType<typeof buildDeterministicLocalCommand>>;
+  result: RuntimeExecuteResult;
+}) {
+  const exitCode =
+    typeof input.result.exitCode === "number"
+      ? input.result.exitCode
+      : input.result.ok
+        ? 0
+        : 1;
+
+  if (input.plan.kind === "create_folder" && input.result.ok) {
+    return [
+      "Done - I created and verified the folder on your Mac:",
+      "",
+      `\`${input.plan.targetPath}\``,
+      "",
+      `Exit code: ${exitCode}.`,
+    ].join("\n");
+  }
+
+  if (input.plan.kind === "create_text_file" && input.result.ok) {
+    return [
+      "Done - I created and verified the text file on your Mac:",
+      "",
+      `\`${input.plan.targetPath}\``,
+      "",
+      `Exit code: ${exitCode}.`,
+    ].join("\n");
+  }
+
+  return [
+    `I tried to create \`${input.plan.targetPath}\`, but the local bridge reported a failure.`,
+    "",
+    `Exit code: ${exitCode}.`,
+    input.result.stderr ? `stderr:\n${input.result.stderr}` : "",
+    input.result.error ? `error:\n${input.result.error}` : "",
+  ]
+    .filter(Boolean)
+    .join("\n\n");
 }
 
 function withVisionRuntimeAgent(
@@ -2288,7 +2567,7 @@ function toRuntimeConversation(
 ) {
   return messages.map((message) => ({
     role: message.role,
-    content: message.contextText || message.content,
+    content: truncateText(message.contextText || message.content, 6000),
     sender: message.sender,
     timestamp: message.timestamp,
     attachments: (message.attachmentIds ?? [])
@@ -2319,6 +2598,17 @@ function reviewCommand(
     return { status: "safe", reasons: [] };
   }
 
+  if (sandboxMode === "none") {
+    return {
+      status: "blocked",
+      reasons: ["Sandbox execution is disabled for this agent."],
+    };
+  }
+
+  if (TRUSTED_PERSONAL_TERMINAL_ACCESS && sandboxMode === "workspace-write") {
+    return { status: "safe", reasons: [] };
+  }
+
   for (const pattern of blockedCommandPatterns) {
     if (pattern.test(trimmedCommand)) {
       return {
@@ -2328,13 +2618,6 @@ function reviewCommand(
         ],
       };
     }
-  }
-
-  if (sandboxMode === "none") {
-    return {
-      status: "blocked",
-      reasons: ["Sandbox execution is disabled for this agent."],
-    };
   }
 
   if (sandboxMode === "read-only") {
@@ -2372,8 +2655,18 @@ function reviewCommand(
   };
 }
 
+function normalizeSandboxCommand(command: string) {
+  return command.trim();
+}
+
 function shouldAutoApproveWorkspaceCommand(agent: WorkspaceAgent) {
-  return agent.id === BUILDER_AGENT_ID;
+  return (
+    agent.id === BUILDER_AGENT_ID ||
+    (TRUSTED_PERSONAL_TERMINAL_ACCESS &&
+      agent.source === "custom" &&
+      agent.permissions.terminal &&
+      agent.sandboxMode === "workspace-write")
+  );
 }
 
 function formatCommandReviewContent(
@@ -2524,9 +2817,135 @@ function loadStoredValue<T>(key: string, fallback: T): T {
   }
 }
 
+function truncateText(value: string, limit = 6000) {
+  if (value.length <= limit) {
+    return value;
+  }
+
+  return `${value.slice(0, limit)}\n...[trimmed for local storage]`;
+}
+
+function trimMessagesForStorage(
+  messagesByAgent: Record<string, ChatMessage[]>,
+  limitPerAgent = 40,
+) {
+  return Object.fromEntries(
+    Object.entries(messagesByAgent).map(([agentId, messages]) => [
+      agentId,
+      messages.slice(-limitPerAgent).map((message) => ({
+        ...message,
+        content: truncateText(message.content),
+      })),
+    ]),
+  );
+}
+
+function trimChannelMessagesForStorage(
+  channelMessagesById: Record<string, ChannelMessage[]>,
+  limitPerChannel = 40,
+) {
+  return Object.fromEntries(
+    Object.entries(channelMessagesById).map(([channelId, messages]) => [
+      channelId,
+      messages.slice(-limitPerChannel).map((message) => ({
+        ...message,
+        content: truncateText(message.content),
+      })),
+    ]),
+  );
+}
+
+function trimCommandRunsForStorage(commandRuns: CommandRun[], limit = 80) {
+  return commandRuns.slice(0, limit).map((run) => ({
+    ...run,
+    stdout: truncateText(run.stdout ?? "", 8000),
+    stderr: truncateText(run.stderr ?? "", 8000),
+    artifacts: (run.artifacts ?? []).slice(0, 8),
+  }));
+}
+
+function safeSetStoredValue(key: string, value: unknown) {
+  if (typeof window === "undefined") {
+    return;
+  }
+
+  try {
+    window.localStorage.setItem(key, JSON.stringify(value));
+  } catch (error) {
+    console.warn(`Skipping ${key} persistence after storage quota error.`, error);
+    try {
+      window.localStorage.removeItem(key);
+    } catch {
+      // Persistence is best-effort; keep the live app responsive.
+    }
+  }
+}
+
+function runLocalStorageMaintenance() {
+  if (typeof window === "undefined") {
+    return;
+  }
+
+  const versionKey = "control-room.storage-maintenance-version";
+  try {
+    const orchestrationStore = window.localStorage.getItem("orchestration-store");
+    if (orchestrationStore && orchestrationStore.length > 500_000) {
+      window.localStorage.removeItem("orchestration-store");
+      window.localStorage.removeItem(versionKey);
+    }
+  } catch {
+    // Ignore cleanup failures; persistence is best-effort.
+  }
+
+  if (window.localStorage.getItem(versionKey) === STORAGE_MAINTENANCE_VERSION) {
+    return;
+  }
+
+  [
+    STORAGE_KEYS.messages,
+    `${STORAGE_KEYS.messages}.reset-version`,
+    STORAGE_KEYS.channelMessages,
+    `${STORAGE_KEYS.channelMessages}.reset-version`,
+    STORAGE_KEYS.commandRuns,
+    "orchestration-store",
+  ].forEach((key) => {
+    try {
+      window.localStorage.removeItem(key);
+    } catch {
+      // Ignore cleanup failures.
+    }
+  });
+
+  try {
+    window.localStorage.setItem(versionKey, STORAGE_MAINTENANCE_VERSION);
+  } catch {
+    // If even the version marker cannot be written, the safe setters below
+    // will still prevent crashes during the current session.
+  }
+}
+
+function delay(milliseconds: number) {
+  return new Promise((resolve) => window.setTimeout(resolve, milliseconds));
+}
+
+function loadConversationStoredValue<T>(key: string, fallback: T): T {
+  if (typeof window === "undefined") {
+    return fallback;
+  }
+
+  const resetKey = `${key}.reset-version`;
+  if (window.localStorage.getItem(resetKey) !== CONVERSATION_RESET_VERSION) {
+    window.localStorage.removeItem(key);
+    window.localStorage.setItem(resetKey, CONVERSATION_RESET_VERSION);
+    return fallback;
+  }
+
+  return loadStoredValue(key, fallback);
+}
+
 function createDefaultMessages(agents: WorkspaceAgent[]) {
   return Object.fromEntries(
-    agents.map((agent) => [agent.id, buildWelcomeThread(agent)]),
+    agents.map((agent) => [agent.id, [] satisfies ChatMessage[]]),
   ) as Record<string, ChatMessage[]>;
 }
 
@@ -2935,6 +3354,8 @@ function generateAgentReply(
 }
 
 function App() {
+  runLocalStorageMaintenance();
+
   const {
     agents: liveAgents,
     activityFeed,
@@ -2962,7 +3383,7 @@ function App() {
     Record<string, ChatMessage[]>
   >(() =>
     sanitizeMessagesByAgent(
-      loadStoredValue(
+      loadConversationStoredValue(
         STORAGE_KEYS.messages,
         createDefaultMessages(defaultCustomAgents),
       ),
@@ -2973,7 +3394,12 @@ function App() {
   );
   const [channelMessagesById, setChannelMessagesById] = useState<
     Record<string, ChannelMessage[]>
-  >(() => createDefaultChannelMessages(defaultChannels, defaultCustomAgents));
+  >(() =>
+    loadConversationStoredValue(
+      STORAGE_KEYS.channelMessages,
+      createDefaultChannelMessages(defaultChannels, defaultCustomAgents),
+    ),
+  );
   const [selectedAgentId, setSelectedAgentId] = useState<string>(() =>
     loadStoredValue(
       STORAGE_KEYS.selectedAgentId,
@@ -3196,8 +3622,9 @@ function App() {
   >({});
   const workspacePersistenceReadyRef = useRef(false);
   const chatScrollAreaRef = useRef<HTMLDivElement | null>(null);
+  const chatScrollViewportRef = useRef<HTMLDivElement | null>(null);
+  const chatShouldStickToBottomRef = useRef(true);
   const messagesEndRef = useRef<HTMLDivElement>(null);
-  const isChatPinnedToBottomRef = useRef(true);
   const lastAutoScrolledAgentIdRef = useRef<string | null>(null);
   const isResizingSidebarRef = useRef(false);
   const chatFileInputRef = useRef<HTMLInputElement>(null);
@@ -3601,36 +4028,55 @@ function App() {
   }
 
   function getChatScrollViewport() {
-    return chatScrollAreaRef.current?.querySelector<HTMLElement>(
-      "[data-radix-scroll-area-viewport]",
+    return (
+      chatScrollViewportRef.current ||
+      chatScrollAreaRef.current?.querySelector<HTMLDivElement>(
+        "[data-radix-scroll-area-viewport]",
+      ) ||
+      null
     );
   }
 
-  function isChatScrollNearBottom(viewport: HTMLElement) {
-    return viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight < 120;
-  }
-
-  useEffect(() => {
-    if (workspaceView !== "chat") {
-      return;
-    }
-
+  function scrollChatToBottom(options: {
+    force?: boolean;
+    behavior?: ScrollBehavior;
+  } = {}) {
     const viewport = getChatScrollViewport();
     if (!viewport) {
       return;
     }
 
-    const updatePinnedState = () => {
-      isChatPinnedToBottomRef.current = isChatScrollNearBottom(viewport);
+    if (!options.force && !chatShouldStickToBottomRef.current) {
+      return;
+    }
+
+    const applyScroll = () => {
+      viewport.scrollTo({
+        top: viewport.scrollHeight,
+        behavior: options.behavior ?? "auto",
+      });
     };
 
-    updatePinnedState();
-    viewport.addEventListener("scroll", updatePinnedState, { passive: true });
+    applyScroll();
+    window.requestAnimationFrame(applyScroll);
+  }
 
-    return () => {
-      viewport.removeEventListener("scroll", updatePinnedState);
+  useEffect(() => {
+    const viewport = getChatScrollViewport();
+    if (!viewport) {
+      return;
+    }
+
+    const handleScroll = () => {
+      const distanceFromBottom =
+        viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight;
+      chatShouldStickToBottomRef.current = distanceFromBottom < 180;
     };
-  }, [selectedAgentId, workspaceView]);
+
+    handleScroll();
+    viewport.addEventListener("scroll", handleScroll, { passive: true });
+    return () => viewport.removeEventListener("scroll", handleScroll);
+  }, [workspaceView]);
 
   useEffect(() => {
     if (workspaceView !== "chat") {
@@ -3638,20 +4084,14 @@ function App() {
     }
 
     const agentChanged = lastAutoScrolledAgentIdRef.current !== selectedAgentId;
-    if (agentChanged) {
-      lastAutoScrolledAgentIdRef.current = selectedAgentId;
-      isChatPinnedToBottomRef.current = true;
-    }
-
-    if (!agentChanged && !isChatPinnedToBottomRef.current) {
+    if (!agentChanged) {
       return;
     }
 
-    messagesEndRef.current?.scrollIntoView({
-      behavior: agentChanged ? "auto" : "smooth",
-      block: "end",
-    });
-  }, [messagesByAgent, selectedAgentId, replyingAgentId, workspaceView]);
+    lastAutoScrolledAgentIdRef.current = selectedAgentId;
+    chatShouldStickToBottomRef.current = true;
+    scrollChatToBottom({ force: true, behavior: "auto" });
+  }, [selectedAgentId, workspaceView]);
 
   const workspaceSyncSignatureRef = useRef({
     customAgents: "",
@@ -3710,6 +4150,91 @@ function App() {
   const selectedThread = selectedAgent
     ? (messagesByAgent[selectedAgent.id] ?? [])
     : [];
+  const latestSelectedMessage =
+    selectedThread.length > 0
+      ? selectedThread[selectedThread.length - 1]
+      : null;
+  const selectedThreadScrollSignature = [
+    selectedAgent?.id ?? "no-agent",
+    selectedThread.length,
+    latestSelectedMessage?.id ?? "no-message",
+    latestSelectedMessage?.role ?? "no-role",
+    latestSelectedMessage?.content.length ?? 0,
+    latestSelectedMessage?.contextText?.length ?? 0,
+    replyingAgentId === selectedAgent?.id ? "replying" : "idle",
+    chatError ? "error" : "ok",
+  ].join(":");
+
+  useEffect(() => {
+    if (workspaceView !== "chat") {
+      return;
+    }
+
+    const shouldForce =
+      latestSelectedMessage?.role === "user" ||
+      replyingAgentId === selectedAgent?.id;
+    if (shouldForce) {
+      chatShouldStickToBottomRef.current = true;
+    }
+
+    const frame = window.requestAnimationFrame(() => {
+      scrollChatToBottom({
+        force: shouldForce,
+        behavior: "auto",
+      });
+    });
+
+    return () => window.cancelAnimationFrame(frame);
+  }, [selectedThreadScrollSignature, workspaceView]);
+
+  function handleClearSelectedAgentChat() {
+    if (!selectedAgent) {
+      return;
+    }
+
+    const shouldClear = window.confirm(
+      `Clear the saved chat history for ${selectedAgent.name}? This only clears this agent's visible conversation.`,
+    );
+    if (!shouldClear) {
+      return;
+    }
+
+    const agentId = selectedAgent.id;
+    setChatError(null);
+    setMessagesByAgent((current) => {
+      const next = {
+        ...current,
+        [agentId]: [] satisfies ChatMessage[],
+      };
+      workspaceSyncSignatureRef.current.messages = messageMapSignature(next);
+      return next;
+    });
+    setThreadTurnsByAgent((current) => ({
+      ...current,
+      [agentId]: [],
+    }));
+
+    const client = supabaseClient;
+    if (!client) {
+      return;
+    }
+
+    void client
+      .from("workspace_messages")
+      .delete()
+      .eq("workspace_id", PERSONAL_WORKSPACE_ID)
+      .eq("agent_id", agentId)
+      .then(({ error }) => {
+        if (error) {
+          setWorkspaceSyncMode("fallback");
+          setWorkspaceSyncError(error.message);
+          setChatError(
+            `Local chat was cleared, but cloud cleanup failed: ${error.message}`,
+          );
+        }
+      });
+  }
+
   const selectedThreadTurns = selectedAgent
     ? (threadTurnsByAgent[selectedAgent.id] ?? [])
     : [];
@@ -4094,113 +4619,52 @@ function App() {
   }, [allAgents, channels]);
 
   useEffect(() => {
-    if (typeof window === "undefined") {
-      return;
-    }
-
-    window.localStorage.setItem(
-      STORAGE_KEYS.customAgents,
-      JSON.stringify(customAgents),
-    );
+    safeSetStoredValue(STORAGE_KEYS.customAgents, customAgents);
   }, [customAgents]);
 
   useEffect(() => {
-    if (typeof window === "undefined") {
-      return;
-    }
-
-    window.localStorage.setItem(
-      STORAGE_KEYS.delegations,
-      JSON.stringify(delegations),
-    );
+    safeSetStoredValue(STORAGE_KEYS.delegations, delegations);
   }, [delegations]);
 
   useEffect(() => {
-    if (typeof window === "undefined") {
-      return;
-    }
-
-    window.localStorage.setItem(
+    safeSetStoredValue(
       STORAGE_KEYS.messages,
-      JSON.stringify(messagesByAgent),
+      trimMessagesForStorage(messagesByAgent),
     );
   }, [messagesByAgent]);
 
   useEffect(() => {
-    if (typeof window === "undefined") {
-      return;
-    }
-
-    window.localStorage.setItem(
-      STORAGE_KEYS.channels,
-      JSON.stringify(channels),
-    );
+    safeSetStoredValue(STORAGE_KEYS.channels, channels);
   }, [channels]);
 
   useEffect(() => {
-    if (typeof window === "undefined") {
-      return;
-    }
-
-    window.localStorage.setItem(
+    safeSetStoredValue(
       STORAGE_KEYS.channelMessages,
-      JSON.stringify(channelMessagesById),
+      trimChannelMessagesForStorage(channelMessagesById),
     );
   }, [channelMessagesById]);
 
   useEffect(() => {
-    if (typeof window === "undefined") {
-      return;
-    }
-
-    window.localStorage.setItem(
+    safeSetStoredValue(
       STORAGE_KEYS.commandRuns,
-      JSON.stringify(commandRuns),
+      trimCommandRunsForStorage(commandRuns),
     );
   }, [commandRuns]);
 
   useEffect(() => {
-    if (typeof window === "undefined") {
-      return;
-    }
-
-    window.localStorage.setItem(
-      STORAGE_KEYS.selectedAgentId,
-      JSON.stringify(selectedAgentId),
-    );
+    safeSetStoredValue(STORAGE_KEYS.selectedAgentId, selectedAgentId);
   }, [selectedAgentId]);
 
   useEffect(() => {
-    if (typeof window === "undefined") {
-      return;
-    }
-
-    window.localStorage.setItem(
-      STORAGE_KEYS.selectedChannelId,
-      JSON.stringify(selectedChannelId),
-    );
+    safeSetStoredValue(STORAGE_KEYS.selectedChannelId, selectedChannelId);
   }, [selectedChannelId]);
 
   useEffect(() => {
-    if (typeof window === "undefined") {
-      return;
-    }
-
-    window.localStorage.setItem(
-      STORAGE_KEYS.workspaceView,
-      JSON.stringify(workspaceView),
-    );
+    safeSetStoredValue(STORAGE_KEYS.workspaceView, workspaceView);
   }, [workspaceView]);
 
   useEffect(() => {
-    if (typeof window === "undefined") {
-      return;
-    }
-
-    window.localStorage.setItem(
-      "control-room.sidebar-width",
-      JSON.stringify(sidebarWidth),
-    );
+    safeSetStoredValue("control-room.sidebar-width", sidebarWidth);
   }, [sidebarWidth]);
 
   useEffect(() => {
@@ -4549,9 +5013,15 @@ function App() {
 
       if (nextMessages.length > 0) {
         const groupedMessages = groupWorkspaceMessages(nextMessages);
-        workspaceSyncSignatureRef.current.messages =
-          messageMapSignature(groupedMessages);
-        setMessagesByAgent(groupedMessages);
+        setMessagesByAgent((current) => {
+          const mergedMessages = mergeMessagesByAgent(current, groupedMessages);
+          workspaceSyncSignatureRef.current.messages =
+            messageMapSignature(mergedMessages);
+          return messageMapSignature(current) ===
+            messageMapSignature(mergedMessages)
+            ? current
+            : mergedMessages;
+        });
       }
 
       if (nextCommandRuns.length > 0) {
@@ -5626,6 +6096,43 @@ function App() {
       .join("\n");
   }
 
+  function normalizeRuntimeArtifacts(value: unknown): RuntimeArtifact[] {
+    if (!Array.isArray(value)) {
+      return [];
+    }
+
+    return value
+      .filter((artifact): artifact is RuntimeArtifact => {
+        if (!artifact || typeof artifact !== "object") {
+          return false;
+        }
+
+        const candidate = artifact as Partial<RuntimeArtifact>;
+        return Boolean(
+          candidate.name ||
+            candidate.path ||
+            candidate.url ||
+            candidate.content,
+        );
+      })
+      .map((artifact) => ({
+        ...artifact,
+        name:
+          artifact.name ||
+          artifact.path?.split("/").pop() ||
+          artifact.url ||
+          "artifact",
+        type: artifact.type || "file",
+      }))
+      .filter((artifact, index, artifacts) => {
+        const key = artifact.path || artifact.url || artifact.name;
+        return artifacts.findIndex(
+          (candidate) =>
+            (candidate.path || candidate.url || candidate.name) === key,
+        ) === index;
+      });
+  }
+
   function extractJsonObject(raw: string) {
     const trimmed = raw.trim();
     const fencedMatch = trimmed.match(/```(?:json)?\s*([\s\S]*?)```/i);
@@ -5654,9 +6161,7 @@ function App() {
   ): Promise<AgentExecutionPlan | null> {
     if (
       !agent.permissions.terminal ||
-      !agent.workspace ||
-      !hasAgentRuntime ||
-      !runtimeHealth.ok
+      !agent.workspace
     ) {
       return null;
     }
@@ -5677,8 +6182,11 @@ function App() {
           'Schema: {"mode":"chat"|"command","command":"string","cwd":"string","reasoning":"string"}',
           "Pick mode=command when terminal work is the right next step: checking files, running tests, git status, searching code, listing directories, building, or debugging.",
           "Also pick mode=command when the user wants you to create, generate, save, export, or modify a local file or artifact such as a PDF, DOCX, CSV, JSON, script, markdown file, image asset, or project file.",
+          "Pick mode=command for downloading files, installing dependencies or packages, running npm/pip/brew/curl/wget, converting or generating PDFs, and any request that should change the user's local computer.",
+          "When a command creates or downloads something, include a verification step such as test -f or test -d, then print the final saved path with CREATED, SAVED, DOWNLOADED, GENERATED, or OUTPUT so the UI can report it accurately.",
           "If the user follow-up refers to prior thread context with phrases like 'run it', 'do it yourself', 'create it', 'save it', or 'go ahead', infer the missing target from the recent conversation instead of asking them to restate it.",
           "Prefer safe read-first commands before mutating commands.",
+          "The trusted local bridge runs commands through the user's normal shell, so standard shell syntax such as $HOME, ~, pipes, redirects, and chained commands is available.",
           "Never claim that anything has already been executed. This is planning only.",
           `Default cwd: ${agent.workspace}`,
           `Agent role: ${agent.role}`,
@@ -5711,7 +6219,9 @@ function App() {
 
     const mode = parsed.mode === "command" ? "command" : "chat";
     const command =
-      typeof parsed.command === "string" ? parsed.command.trim() : "";
+      typeof parsed.command === "string"
+        ? normalizeSandboxCommand(parsed.command.trim())
+        : "";
     const cwd =
       typeof parsed.cwd === "string" && parsed.cwd.trim()
         ? parsed.cwd.trim()
@@ -5770,60 +6280,48 @@ function App() {
       ].join("\n\n");
     }
 
-    const response = await sendAgentRuntimeChat({
-      agent: {
-        ...input.agent,
-        systemPrompt: [
-          input.agent.systemPrompt,
-          "You are replying after a sandbox action finished.",
-          "Base your answer only on the provided command result.",
-          "Do not claim you ran any commands besides the provided one.",
-          "Keep the answer direct and useful.",
-        ].join("\n\n"),
-      },
-      messages: [
-        ...toRuntimeConversation(input.previousThread, attachmentLibrary),
-        {
-          role: "user",
-          content: input.userPrompt,
-        },
-        {
-          role: "user",
-          content: [
-            "Sandbox result:",
-            `Command: ${input.command}`,
-            input.result.cwd ? `Cwd: ${input.result.cwd}` : "",
-            typeof input.result.exitCode === "number"
-              ? `Exit code: ${input.result.exitCode}`
-              : "",
-            input.result.timedOut ? "The command timed out." : "",
-            input.result.stdout ? `stdout:\n${input.result.stdout}` : "",
-            input.result.stderr ? `stderr:\n${input.result.stderr}` : "",
-            input.result.error ? `error: ${input.result.error}` : "",
-            input.result.artifacts?.length
-              ? `artifacts:\n${input.result.artifacts
-                  .map(
-                    (artifact) =>
-                      artifact.path || artifact.url || artifact.name,
-                  )
-                  .filter(Boolean)
-                  .join("\n")}`
-              : "",
-            "Now answer the user's request using this real execution result.",
-          ]
-            .filter(Boolean)
-            .join("\n\n"),
-        },
-      ],
-    });
+    const generatedArtifact =
+      (input.result.artifacts ?? []).find(
+        (artifact) => artifact.path || artifact.url || artifact.name,
+      ) ?? null;
 
-    if (response.ok && response.text) {
-      return response.text;
+    if (input.result.ok && generatedArtifact) {
+      return [
+        `Done - I finished the terminal task and saved the output to \`${generatedArtifact.path || generatedArtifact.url || generatedArtifact.name}\`.`,
+        typeof input.result.exitCode === "number"
+          ? `Exit code: ${input.result.exitCode}.`
+          : "",
+        input.result.stdout ? `\nOutput:\n${input.result.stdout}` : "",
+      ]
+        .filter(Boolean)
+        .join("\n");
     }
 
     return input.result.ok
-      ? `I used the sandbox for this request and the command finished successfully.\n\nCommand: \`${input.command}\`${input.result.stdout ? `\n\n${input.result.stdout}` : ""}`
-      : `I used the sandbox for this request, but the command failed.\n\nCommand: \`${input.command}\`${input.result.error ? `\n\nError: ${input.result.error}` : ""}${input.result.stderr ? `\n\n${input.result.stderr}` : ""}`;
+      ? [
+          "Done - the local terminal command completed successfully.",
+          "",
+          `Command: \`${input.command}\``,
+          input.result.cwd ? `Location: \`${input.result.cwd}\`` : "",
+          typeof input.result.exitCode === "number"
+            ? `Exit code: ${input.result.exitCode}.`
+            : "",
+          input.result.stdout ? `\nOutput:\n${input.result.stdout}` : "",
+        ]
+          .filter(Boolean)
+          .join("\n")
+      : [
+          "I ran the local terminal command, but it failed.",
+          "",
+          `Command: \`${input.command}\``,
+          typeof input.result.exitCode === "number"
+            ? `Exit code: ${input.result.exitCode}.`
+            : "",
+          input.result.error ? `\nError:\n${input.result.error}` : "",
+          input.result.stderr ? `\nstderr:\n${input.result.stderr}` : "",
+        ]
+          .filter(Boolean)
+          .join("\n");
   }
 
   async function summarizeAgentExecutionSequence(input: {
@@ -5833,7 +6331,7 @@ function App() {
     steps: ExecutionStepResult[];
     browserContextMessages?: RuntimeChatMessage[];
     finalReasoning?: string;
-  }) {
+  }): Promise<string> {
     const generatedArtifact =
       input.steps
         .flatMap((step) => step.result.artifacts ?? [])
@@ -5884,6 +6382,47 @@ function App() {
       )
       .join("\n\n");
 
+    if (generatedArtifact?.path) {
+      return `Done - I finished the requested work and saved the output to \`${generatedArtifact.path}\`.`;
+    }
+
+    const lastStep = input.steps[input.steps.length - 1];
+    if (!lastStep) {
+      return "Done - I finished the task in the sandbox.";
+    }
+
+    const allSucceeded = input.steps.every((step) => step.result.ok);
+    const exitCode =
+      typeof lastStep.result.exitCode === "number"
+        ? lastStep.result.exitCode
+        : allSucceeded
+          ? 0
+          : 1;
+
+    return allSucceeded
+      ? [
+          `Done - the local command completed successfully.`,
+          "",
+          `Command: \`${lastStep.command}\``,
+          lastStep.result.cwd || lastStep.cwd
+            ? `Location: \`${lastStep.result.cwd || lastStep.cwd}\``
+            : "",
+          `Exit code: ${exitCode}.`,
+          lastStep.result.stdout ? `\nOutput:\n${lastStep.result.stdout}` : "",
+        ]
+          .filter(Boolean)
+          .join("\n")
+      : [
+          "I ran the local command, but the bridge reported a failure.",
+          "",
+          `Command: \`${lastStep.command}\``,
+          `Exit code: ${exitCode}.`,
+          lastStep.result.stderr ? `\nstderr:\n${lastStep.result.stderr}` : "",
+          lastStep.result.error ? `\nerror:\n${lastStep.result.error}` : "",
+        ]
+          .filter(Boolean)
+          .join("\n");
+
     const response = await sendAgentRuntimeChat({
       agent: {
         ...input.agent,
@@ -5918,21 +6457,10 @@ function App() {
     });
 
     if (response.ok && response.text) {
-      return response.text;
+      return `${response.text}`;
     }
 
-    if (generatedArtifact?.path) {
-      return `I finished the requested work and saved the output to \`${generatedArtifact.path}\`. You can open it from Activity -> Files.`;
-    }
-
-    const lastStep = input.steps[input.steps.length - 1];
-    if (!lastStep) {
-      return "I finished the task in the sandbox.";
-    }
-
-    return lastStep.result.ok
-      ? `I finished the sandbox work for this request after ${input.steps.length} step${input.steps.length === 1 ? "" : "s"}.\n\nLast command: \`${lastStep.command}\`${lastStep.result.stdout ? `\n\n${lastStep.result.stdout}` : ""}`
-      : `I made progress in the sandbox, but the last step failed.\n\nCommand: \`${lastStep.command}\`${lastStep.result.error ? `\n\nError: ${lastStep.result.error}` : ""}${lastStep.result.stderr ? `\n\n${lastStep.result.stderr}` : ""}`;
+    return "Done - I finished the local command and recorded the bridge output in Activity.";
   }
 
   async function streamAssistantReply(input: {
@@ -5963,10 +6491,39 @@ function App() {
     });
 
     appendAgentMessage(input.agent.id, message);
-    updateAgentMessage(input.agent.id, messageId, (current) => ({
-      ...current,
-      content: input.text,
-    }));
+    const typingUnits = input.text.match(/\S+\s*/g) ?? [input.text];
+    let visibleText = "";
+    const maxAnimatedUnits = 420;
+
+    for (let index = 0; index < typingUnits.length; index += 1) {
+      const remainingUnits = typingUnits.length - index;
+      const unitsThisFrame =
+        index > maxAnimatedUnits
+          ? Math.min(remainingUnits, 8)
+          : typingUnits.length > 220
+            ? Math.min(remainingUnits, 2)
+            : 1;
+      visibleText += typingUnits.slice(index, index + unitsThisFrame).join("");
+      index += unitsThisFrame - 1;
+
+      updateAgentMessage(input.agent.id, messageId, (current) => ({
+        ...current,
+        content: visibleText,
+      }));
+
+      if (index < typingUnits.length - 1) {
+        const lastUnit = typingUnits[index] ?? "";
+        const pause =
+          typingUnits.length > 420
+            ? 8
+            : /[.!?]["')\]]?\s*$/.test(lastUnit)
+              ? 58
+              : /[,;:]\s*$/.test(lastUnit)
+                ? 34
+                : 18;
+        await delay(pause);
+      }
+    }
 
     updateLiveActivity(activityId, (entry) => ({
       ...entry,
@@ -6048,11 +6605,7 @@ function App() {
       }
     }
 
-    if (
-      input.agent.source === "custom" &&
-      hasAgentRuntime &&
-      runtimeHealth.ok
-    ) {
+    if (input.agent.source === "custom") {
       const memoryContext = await loadPhaseTwoMemoryContext(input.agent.id);
       const executionContextMessages: ChatMessage[] = [];
       const executionSteps: ExecutionStepResult[] = [];
@@ -6061,7 +6614,73 @@ function App() {
       let loopWaitingForApproval = false;
       const seenCommands = new Set<string>();
 
-      for (let stepIndex = 0; stepIndex < 4; stepIndex += 1) {
+      if (shouldConsiderSandboxExecution(input.prompt)) {
+        const deterministicPlan = buildDeterministicLocalCommand(
+          input.prompt,
+          previousThread,
+        );
+        if (deterministicPlan) {
+          const commandExecution = await handleCommandExecutionRequest({
+            agent: input.agent,
+            command: deterministicPlan.command,
+            cwd: deterministicPlan.cwd,
+            source: "agent",
+          });
+
+          if (commandExecution.status === "waiting_for_approval") {
+            return {
+              ok: false,
+              text: "Execution is waiting for command approval before continuing.",
+            };
+          }
+
+          if (commandExecution.status === "queued") {
+            return {
+              ok: false,
+              text:
+                commandExecution.result.error ||
+                "I queued the command on the local bridge and am waiting for it to run.",
+            };
+          }
+
+          if (commandExecution.status === "blocked") {
+            return {
+              ok: false,
+              text: "The local command was blocked before execution.",
+            };
+          }
+
+          const replyText = formatDeterministicCommandReply({
+            plan: deterministicPlan,
+            result: commandExecution.result,
+          });
+
+          appendAgentMessage(input.agent.id, {
+            id: `${input.agent.id}-channel-assistant-${Date.now().toString(36)}`,
+            agentId: input.agent.id,
+            role: "assistant",
+            sender: input.agent.name,
+            content: replyText,
+            timestamp: new Date().toISOString(),
+          });
+          void persistPhaseTwoMessage(
+            {
+              agentId: input.agent.id,
+              role: "assistant",
+              content: replyText,
+              sender: input.agent.name,
+            },
+            previousThread.length + 2,
+            { source: "channel_deterministic_command_result" },
+          );
+
+          return {
+            ok: commandExecution.result.ok,
+            text: replyText,
+          };
+        }
+
+        for (let stepIndex = 0; stepIndex < 4; stepIndex += 1) {
         const executionPlan = await planAgentExecution(
           input.agent,
           input.prompt,
@@ -6093,6 +6712,15 @@ function App() {
           finalReasoning =
             "Execution is waiting for command approval before continuing.";
           break;
+        }
+
+        if (commandExecution.status === "queued") {
+          return {
+            ok: false,
+            text:
+              commandExecution.result.error ||
+              "I queued the command on the local bridge and am waiting for it to run.",
+          };
         }
 
         if (commandExecution.status === "blocked") {
@@ -6157,6 +6785,7 @@ function App() {
           finalReasoning = "Execution stopped because a sandbox step failed.";
           break;
         }
+        }
       }
 
       if (loopWaitingForApproval) {
@@ -6195,42 +6824,29 @@ function App() {
           browserContextMessages,
           finalReasoning,
         });
-        const critiqued = await runCritiquedText({
-          agent: input.agent,
-          prompt: input.prompt,
-          text: summary,
-          contextMessages: [
-            ...memoryContext.runtimeMessages,
-            ...toRuntimeConversation(
-              [...previousThread, userMessage, ...executionContextMessages],
-              attachmentLibrary,
-            ),
-            ...browserContextMessages,
-          ],
-        });
 
         appendAgentMessage(input.agent.id, {
           id: `${input.agent.id}-channel-assistant-${Date.now().toString(36)}`,
           agentId: input.agent.id,
           role: "assistant",
           sender: input.agent.name,
-          content: critiqued.text,
+          content: summary,
           timestamp: new Date().toISOString(),
         });
         void persistPhaseTwoMessage(
           {
             agentId: input.agent.id,
             role: "assistant",
-            content: critiqued.text,
+            content: summary,
             sender: input.agent.name,
           },
           previousThread.length + 2,
-          { source: "channel_assistant_summary" },
+          { source: "channel_command_result_summary" },
         );
 
         return {
           ok: executionSteps[executionSteps.length - 1]?.result.ok ?? true,
-          text: critiqued.text,
+          text: summary,
         };
       }
 
@@ -6250,32 +6866,19 @@ function App() {
       });
 
       if (result.ok && result.text) {
-        const critiqued = await runCritiquedText({
-          agent: input.agent,
-          prompt: input.prompt,
-          text: result.text,
-          contextMessages: [
-            ...memoryContext.runtimeMessages,
-            ...toRuntimeConversation(
-              [...previousThread, userMessage],
-              attachmentLibrary,
-            ),
-            ...browserContextMessages,
-          ],
-        });
         appendAgentMessage(input.agent.id, {
           id: `${input.agent.id}-channel-assistant-${Date.now().toString(36)}`,
           agentId: input.agent.id,
           role: "assistant",
           sender: input.agent.name,
-          content: critiqued.text,
+          content: result.text,
           timestamp: new Date().toISOString(),
         });
         void persistPhaseTwoMessage(
           {
             agentId: input.agent.id,
             role: "assistant",
-            content: critiqued.text,
+            content: result.text,
             sender: input.agent.name,
           },
           previousThread.length + 2,
@@ -6284,9 +6887,26 @@ function App() {
 
         return {
           ok: true,
-          text: critiqued.text,
+          text: result.text,
         };
       }
+
+      const errorText =
+        result.error ||
+        `${input.agent.name} could not produce a live collaboration reply.`;
+      appendAgentMessage(input.agent.id, {
+        id: `${input.agent.id}-channel-error-${Date.now().toString(36)}`,
+        agentId: input.agent.id,
+        role: "system",
+        sender: "Runtime",
+        content: `Channel collaboration failed: ${errorText}`,
+        timestamp: new Date().toISOString(),
+      });
+
+      return {
+        ok: false,
+        text: `I couldn't complete my channel reply because the model call failed: ${errorText}`,
+      };
     }
 
     const fallback = generateAgentReply(input.agent, input.prompt, delegations);
@@ -6792,6 +7412,334 @@ function App() {
     });
   }
 
+  function getCloudBridgeSecret() {
+    if (typeof window === "undefined") {
+      return CLOUD_BRIDGE_INGEST_SECRET;
+    }
+
+    return (
+      window.localStorage.getItem(CLOUD_BRIDGE_SECRET_STORAGE_KEY)?.trim() ||
+      CLOUD_BRIDGE_INGEST_SECRET
+    );
+  }
+
+  async function enqueueCloudBridgeCommand(input: {
+    agent: WorkspaceAgent;
+    command: string;
+    cwd: string;
+    source: CommandExecutionSource | "chat";
+    label?: string;
+  }) {
+    const secret = getCloudBridgeSecret();
+    const payload = {
+      cwd: input.cwd,
+      label:
+        input.label ||
+        `Control Room ${input.source === "chat" ? "chat" : "command"} for ${input.agent.name}`,
+      source: input.source,
+      requestedAgentId: input.agent.id,
+      requestedAgentName: input.agent.name,
+    };
+    let serverRouteError = "";
+
+    if (typeof window !== "undefined") {
+      try {
+        const response = await fetch("/api/issue-command", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            ...(secret ? { "X-Clawbuddy-Secret": secret } : {}),
+          },
+          body: JSON.stringify({
+            agentId: CLOUD_BRIDGE_AGENT_ID,
+            command: input.command,
+            requestedBy: "deployed-control-room",
+            payload,
+          }),
+        });
+
+        if (response.ok) {
+          const data = await response.json().catch(() => ({ ok: true }));
+          return { ok: true, data };
+        }
+
+        if (response.status !== 404) {
+          const data = (await response.json().catch(() => ({}))) as {
+            error?: string;
+          };
+          return {
+            ok: false,
+            error: data.error || "Cloud bridge server could not queue the command.",
+          };
+        }
+      } catch (error) {
+        serverRouteError =
+          error instanceof Error
+            ? `Cloud bridge server request failed: ${error.message}`
+            : "Cloud bridge server request failed.";
+      }
+    }
+
+    if (!secret) {
+      return {
+        ok: false,
+        error:
+          serverRouteError ||
+          "Cloud bridge credentials are not configured for this deployment yet.",
+      };
+    }
+
+    if (!isLocalBrowserOrigin() && !CLOUD_BRIDGE_INGEST_SECRET) {
+      return {
+        ok: false,
+        error:
+          serverRouteError ||
+          "Cloud bridge server route was not found on this deployment. Hard refresh and try again.",
+      };
+    }
+
+    try {
+      const data = await issueAgentCommand({
+        agentId: CLOUD_BRIDGE_AGENT_ID,
+        command: input.command,
+        secret,
+        requestedBy: "deployed-control-room",
+        payload,
+      });
+
+      return { ok: true, data };
+    } catch (error) {
+      return {
+        ok: false,
+        error:
+          error instanceof Error
+            ? error.message
+            : "Failed to enqueue command for the cloud bridge.",
+      };
+    }
+  }
+
+  async function fetchBridgeCommandStatus(commandId: string) {
+    const secret = getCloudBridgeSecret();
+    const response = await fetch("/api/bridge-command-status", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...(secret ? { "X-Clawbuddy-Secret": secret } : {}),
+      },
+      body: JSON.stringify({ commandId }),
+    });
+    const data = (await response.json().catch(() => ({}))) as {
+      command?: BridgeCommandRow;
+      error?: string;
+    };
+
+    if (!response.ok) {
+      throw new Error(data.error || "Failed to fetch bridge command status.");
+    }
+
+    return data.command ?? null;
+  }
+
+  async function waitForBridgeCommandCompletion(input: {
+    bridgeCommandId: string;
+    runId: string;
+    activityId: string;
+    agent: WorkspaceAgent;
+    command: string;
+    cwd: string;
+    task?: DelegationTask;
+  }): Promise<RuntimeExecuteResult> {
+    const startedAt = Date.now();
+    const timeoutMs = 10 * 60 * 1000;
+
+    while (Date.now() - startedAt < timeoutMs) {
+      await delay(2000);
+
+      let commandRow: BridgeCommandRow | null = null;
+      try {
+        commandRow = await fetchBridgeCommandStatus(input.bridgeCommandId);
+      } catch {
+        continue;
+      }
+
+      if (!commandRow) {
+        continue;
+      }
+
+      if (commandRow.status === "pending") {
+        setCommandRuns((current) =>
+          current.map((run) =>
+            run.id === input.runId
+              ? {
+                  ...run,
+                  status: "queued",
+                  phase: "queued",
+                  activityLabel: "Local Bridge Queued",
+                  activitySummary: "Waiting for local bridge to claim command",
+                }
+              : run,
+          ),
+        );
+        updateLiveActivity(input.activityId, (entry) => ({
+          ...entry,
+          status: "idle",
+          detail: "Waiting for local bridge to claim command",
+          timestamp: new Date().toISOString(),
+        }));
+        continue;
+      }
+
+      if (commandRow.status === "dispatched" || commandRow.status === "running") {
+        setCommandRuns((current) =>
+          current.map((run) =>
+            run.id === input.runId
+              ? {
+                  ...run,
+                  status: "running",
+                  phase: "executing",
+                  activityLabel: "Local Bridge Running",
+                  activitySummary: input.command,
+                }
+              : run,
+          ),
+        );
+        updateLiveActivity(input.activityId, (entry) => ({
+          ...entry,
+          status: "running",
+          detail: "Local bridge is executing the command",
+          timestamp: new Date().toISOString(),
+        }));
+        continue;
+      }
+
+      if (
+        commandRow.status !== "completed" &&
+        commandRow.status !== "failed" &&
+        commandRow.status !== "canceled"
+      ) {
+        continue;
+      }
+
+      const completedAt = commandRow.updated_at || new Date().toISOString();
+      const result = commandRow.result ?? {};
+      const ok = commandRow.status === "completed";
+      const canceled = commandRow.status === "canceled";
+      const stdout = typeof result.stdout === "string" ? result.stdout : "";
+      const stderr = typeof result.stderr === "string" ? result.stderr : "";
+      const error = typeof result.error === "string" ? result.error : "";
+      const artifacts = normalizeRuntimeArtifacts(result.artifacts);
+      const exitCode =
+        typeof result.exitCode === "number" ? result.exitCode : ok ? 0 : 1;
+      const finalRunStatus: CommandRun["status"] = ok
+        ? "completed"
+        : canceled
+          ? "canceled"
+          : "failed";
+      const finalRunPhase: NonNullable<CommandRun["phase"]> = ok
+        ? "completed"
+        : canceled
+          ? "canceled"
+          : "failed";
+      const cwd = typeof result.cwd === "string" && result.cwd ? result.cwd : input.cwd;
+
+      setCommandRuns((current) =>
+        current.map((run) =>
+          run.id === input.runId
+            ? {
+                ...run,
+                status: finalRunStatus,
+                phase: finalRunPhase,
+                exitCode,
+                stdout,
+                stderr,
+                timedOut: Boolean(result.timedOut),
+                durationMs:
+                  typeof result.durationMs === "number" ? result.durationMs : null,
+                cwd,
+                completedAt,
+                error,
+                artifacts,
+                activityLabel: ok
+                  ? "Local Bridge Completed"
+                  : canceled
+                    ? "Local Bridge Canceled"
+                    : "Local Bridge Failed",
+                activitySummary: ok ? "Command finished on local computer" : error || stderr,
+              }
+            : run,
+        ),
+      );
+      updateLiveActivity(input.activityId, (entry) => ({
+        ...entry,
+        status: ok ? "completed" : "failed",
+        detail: ok
+          ? "Local bridge finished the command"
+          : error || stderr || "Local bridge command failed",
+        timestamp: completedAt,
+      }));
+
+      if (input.task) {
+        updateDelegationTask(input.task.id, (current) => ({
+          ...current,
+          status: ok ? "done" : "blocked",
+          updatedAt: completedAt,
+        }));
+      }
+
+      updateCustomAgent(input.agent.id, (agent) => ({
+        ...agent,
+        status: ok ? "idle" : "error",
+        currentActivity: ok
+          ? "Local bridge command completed"
+          : "Local bridge command failed",
+        lastSeen: completedAt,
+      }));
+
+      return {
+        ok,
+        exitCode,
+        stdout,
+        stderr,
+        timedOut: Boolean(result.timedOut),
+        durationMs: typeof result.durationMs === "number" ? result.durationMs : undefined,
+        cwd,
+        error,
+        artifacts,
+        canceled,
+      };
+    }
+
+    const timeoutMessage =
+      "Timed out waiting for the local bridge to report completion.";
+    setCommandRuns((current) =>
+      current.map((run) =>
+        run.id === input.runId
+          ? {
+              ...run,
+              status: "blocked",
+              phase: "blocked",
+              error: timeoutMessage,
+              activitySummary: timeoutMessage,
+            }
+          : run,
+      ),
+    );
+    updateLiveActivity(input.activityId, (entry) => ({
+      ...entry,
+      status: "failed",
+      detail: timeoutMessage,
+      timestamp: new Date().toISOString(),
+    }));
+
+    return {
+      ok: false,
+      cwd: input.cwd,
+      error: timeoutMessage,
+      canceled: true,
+    };
+  }
+
   async function runCommandForAgent(input: {
     agent: WorkspaceAgent;
     command: string;
@@ -6850,24 +7798,133 @@ function App() {
       return null;
     }
 
-    if (!hasAgentRuntime || !runtimeHealth.ok) {
-      blockCommandExecution({
-        ...input,
-        review: {
-          status: "blocked",
-          reasons: [
-            "Local runtime is offline, so the sandbox command could not run.",
-          ],
-        },
-        errorMessage:
-          "Local runtime is offline, so the sandbox command could not run.",
-      });
-      return null;
-    }
-
     if (isRunnerFlow) {
       setCommandError(null);
       setIsExecutingCommand(true);
+    }
+
+    if (!hasAgentRuntime || !runtimeHealth.ok) {
+      const bridgeResult = await enqueueCloudBridgeCommand({
+        ...input,
+        source: input.source,
+        label:
+          input.source === "delegation"
+            ? `Delegated command from ${input.ownerName ?? "Control Room"}`
+            : "Manual command from deployed Control Room",
+      });
+
+      const queuedAt = new Date().toISOString();
+
+      if (!bridgeResult.ok) {
+        blockCommandExecution({
+          ...input,
+          review: {
+            status: "blocked",
+            reasons: [
+              "The local runtime is offline and the cloud bridge could not accept the command.",
+            ],
+          },
+          errorMessage:
+            bridgeResult.error ||
+            "The local runtime is offline and the cloud bridge could not accept the command.",
+        });
+
+        if (isRunnerFlow) {
+          setIsExecutingCommand(false);
+        }
+
+        return null;
+      }
+
+      const queuedRun: CommandRun = {
+        id: runId,
+        agentId: input.agent.id,
+        command: input.command,
+        cwd: resolvedCwd,
+        status: "queued",
+        phase: "queued",
+        exitCode: null,
+        stdout: "",
+        stderr: "",
+        timedOut: false,
+        durationMs: null,
+        createdAt: queuedAt,
+        activityKind: "sandbox",
+        activityLabel: "Cloud Bridge Queued",
+        activitySummary: `Queued for bridge agent ${CLOUD_BRIDGE_AGENT_ID}`,
+        artifacts: [],
+      };
+
+      setCommandRuns((current) => [queuedRun, ...current]);
+      const bridgeCommandId =
+        typeof (bridgeResult.data as { command?: { id?: unknown } })?.command
+          ?.id === "string"
+          ? (bridgeResult.data as { command: { id: string } }).command.id
+          : "";
+
+      pushLiveActivity({
+        id: activityId,
+        agentId: input.agent.id,
+        kind: "sandbox",
+        label: "Cloud Bridge Queued",
+        detail: "Sent to local bridge",
+        status: "idle",
+        timestamp: queuedAt,
+      });
+
+      if (input.task) {
+        updateDelegationTask(input.task.id, (current) => ({
+          ...current,
+          status: "active",
+          updatedAt: queuedAt,
+        }));
+      }
+
+      updateCustomAgent(input.agent.id, (agent) => ({
+        ...agent,
+        status: "active",
+        currentActivity: "Sent command to local bridge",
+        lastSeen: queuedAt,
+      }));
+
+      if (bridgeCommandId) {
+        const bridgeExecution = await waitForBridgeCommandCompletion({
+          bridgeCommandId,
+          runId,
+          activityId,
+          agent: input.agent,
+          command: input.command,
+          cwd: resolvedCwd,
+          task: input.task,
+        });
+
+        if (isRunnerFlow) {
+          setCommandDraft("");
+          setIsExecutingCommand(false);
+          if (!bridgeExecution.ok) {
+            setCommandError(
+              bridgeExecution.error || "The local bridge command failed.",
+            );
+          }
+        }
+
+        return bridgeExecution;
+      }
+
+      if (isRunnerFlow) {
+        setCommandDraft("");
+        setIsExecutingCommand(false);
+      }
+
+      return {
+        ok: false,
+        stdout: "",
+        stderr: "",
+        cwd: resolvedCwd,
+        canceled: true,
+        error:
+          "Queued on the local bridge. Waiting for the bridge to claim and execute it.",
+      } as RuntimeExecuteResult;
     }
 
     if (input.task) {
@@ -7187,14 +8244,21 @@ function App() {
     task?: DelegationTask;
     ownerName?: string;
   }): Promise<CommandExecutionRequestResult> {
-    const review = reviewCommand(input.command, input.agent.sandboxMode);
+    const normalizedInput = {
+      ...input,
+      command: normalizeSandboxCommand(input.command),
+    };
+    const review = reviewCommand(
+      normalizedInput.command,
+      normalizedInput.agent.sandboxMode,
+    );
     const autoApprove =
       review.status === "approval" &&
-      shouldAutoApproveWorkspaceCommand(input.agent);
+      shouldAutoApproveWorkspaceCommand(normalizedInput.agent);
 
     if (review.status === "blocked") {
       blockCommandExecution({
-        ...input,
+        ...normalizedInput,
         review,
       });
       return { status: "blocked" };
@@ -7202,13 +8266,20 @@ function App() {
 
     if (review.status === "approval" && !autoApprove) {
       requestCommandApproval({
-        ...input,
+        ...normalizedInput,
         reasons: review.reasons,
       });
       return { status: "waiting_for_approval" };
     }
 
-    const result = await runCommandForAgent(input);
+    const result = await runCommandForAgent(normalizedInput);
+    if (
+      result?.canceled &&
+      result.error?.startsWith("Queued on the local bridge")
+    ) {
+      return { status: "queued", result };
+    }
+
     return result ? { status: "completed", result } : { status: "blocked" };
   }
 
@@ -7332,7 +8403,13 @@ function App() {
       });
 
       if (approval.source === "agent" && result) {
-        const completionText = result.ok
+        const completionText = result.canceled &&
+          result.error?.startsWith("Queued on the local bridge")
+          ? [
+              `Queued \`${approval.command}\` on your local bridge.`,
+              "I won’t mark it as done until bridge output confirms it ran.",
+            ].join("\n\n")
+          : result.ok
           ? [
               `Done - I ran \`${approval.command}\`.`,
               result.cwd ? `Location: \`${result.cwd}\`.` : "",
@@ -7786,7 +8863,7 @@ function App() {
 
       appendAgentMessage(assignee.id, delegateMessage);
 
-      if (assignee.source === "custom" && hasAgentRuntime && runtimeHealth.ok) {
+      if (assignee.source === "custom") {
         updateCustomAgent(assignee.id, (agent) => ({
           ...agent,
           status: "active",
@@ -8280,7 +9357,11 @@ function App() {
     upsertTaskTree(taskTree);
     setSelectedTaskTreeId(taskTree.id);
 
-    if (dispatcherDecision.requiresPlanReview) {
+    if (
+      dispatcherDecision.requiresPlanReview &&
+      (shouldConsiderSandboxExecution(expandedPrompt) ||
+        routerResult.decision.lane === "channel")
+    ) {
       const review = buildPlanReviewRequest({
         dispatcherDecision,
         prompt: expandedPrompt,
@@ -8307,8 +9388,7 @@ function App() {
       decision: routerResult.decision,
     });
 
-    const useLiveRuntime =
-      hasAgentRuntime && selectedAgentSnapshot.source === "custom";
+    const useLiveRuntime = selectedAgentSnapshot.source === "custom";
     const messageHasImageInput = hasImageAttachments(chatDraftAttachments);
     const shouldOpenRoutedChannel = routerResult.decision.lane === "channel";
     const shouldOpenBrowserSession =
@@ -8318,6 +9398,16 @@ function App() {
         Boolean(runtimeHealth.providers?.browserUse),
       ) && !shouldOpenRoutedChannel;
     const finishReplyingForAgent = () => {
+      updateLiveActivity(thinkingActivityId, (entry) =>
+        entry.status === "running"
+          ? {
+              ...entry,
+              status: "completed",
+              detail: entry.detail || "Reply delivered.",
+              timestamp: new Date().toISOString(),
+            }
+          : entry,
+      );
       setIsReplying(false);
       setReplyingAgentId((current) =>
         current === selectedAgentSnapshot.id ? null : current,
@@ -8463,7 +9553,104 @@ function App() {
       let loopBlocked = false;
       const seenCommands = new Set<string>();
 
-      if (!messageHasImageInput) {
+      if (
+        !messageHasImageInput &&
+        shouldConsiderSandboxExecution(expandedPrompt)
+      ) {
+        const deterministicPlan = buildDeterministicLocalCommand(
+          expandedPrompt,
+          previousThread,
+        );
+        if (deterministicPlan) {
+          updateLiveActivity(thinkingActivityId, (entry) => ({
+            ...entry,
+            status: "running",
+            detail: deterministicPlan.reasoning,
+            timestamp: new Date().toISOString(),
+          }));
+
+          const commandExecution = await handleCommandExecutionRequest({
+            agent: selectedAgentSnapshot,
+            command: deterministicPlan.command,
+            cwd: deterministicPlan.cwd,
+            source: "agent",
+          });
+
+          if (commandExecution.status === "waiting_for_approval") {
+            updateLiveActivity(thinkingActivityId, (entry) => ({
+              ...entry,
+              status: "idle",
+              detail: "Waiting for approval before running the local command.",
+              timestamp: new Date().toISOString(),
+            }));
+            finishReplyingForAgent();
+            return;
+          }
+
+          if (commandExecution.status === "queued") {
+            const queuedMessage =
+              commandExecution.result.error ||
+              "I queued the command on your local bridge. I’ll wait for the bridge activity/output before claiming it finished.";
+            updateLiveActivity(thinkingActivityId, (entry) => ({
+              ...entry,
+              status: "idle",
+              detail: "Command queued on local bridge",
+              timestamp: new Date().toISOString(),
+            }));
+            await streamAssistantReply({
+              agent: selectedAgentSnapshot,
+              text: queuedMessage,
+              previousThread,
+            });
+            finishReplyingForAgent();
+            return;
+          }
+
+          if (commandExecution.status === "blocked") {
+            const blockedMessage =
+              "I couldn't run that local command because it was blocked before execution.";
+            updateLiveActivity(thinkingActivityId, (entry) => ({
+              ...entry,
+              status: "failed",
+              detail: blockedMessage,
+              timestamp: new Date().toISOString(),
+            }));
+            await streamAssistantReply({
+              agent: selectedAgentSnapshot,
+              text: blockedMessage,
+              previousThread,
+            });
+            finishReplyingForAgent();
+            return;
+          }
+
+          const replyText = formatDeterministicCommandReply({
+            plan: deterministicPlan,
+            result: commandExecution.result,
+          });
+
+          await streamAssistantReply({
+            agent: selectedAgentSnapshot,
+            text: replyText,
+            previousThread,
+          });
+
+          updateTaskTree(taskTree.id, (current) => ({
+            ...current,
+            status: commandExecution.result.ok ? "completed" : "blocked",
+            finalSummary: replyText,
+            updatedAt: new Date().toISOString(),
+            nodes: current.nodes.map((node) => ({
+              ...node,
+              status: commandExecution.result.ok ? "completed" : "blocked",
+              updatedAt: new Date().toISOString(),
+            })),
+          }));
+
+          finishReplyingForAgent();
+          return;
+        }
+
         for (let stepIndex = 0; stepIndex < 4; stepIndex += 1) {
           const executionPlan = await planAgentExecution(
             selectedAgentSnapshot,
@@ -8550,20 +9737,47 @@ function App() {
             return;
           }
 
+          if (commandExecution.status === "queued") {
+            const queuedMessage =
+              commandExecution.result.error ||
+              "I queued the command on your local bridge. I’ll wait for the bridge activity/output before claiming it finished.";
+
+            updateLiveActivity(thinkingActivityId, (entry) => ({
+              ...entry,
+              status: "idle",
+              detail: "Command queued on local bridge",
+              timestamp: new Date().toISOString(),
+            }));
+            updateTaskTree(taskTree.id, (current) => ({
+              ...current,
+              status: "running",
+              finalSummary: queuedMessage,
+              updatedAt: new Date().toISOString(),
+              nodes: current.nodes.map((node) =>
+                node.kind === "execution"
+                  ? {
+                      ...node,
+                      status: "running",
+                      updatedAt: new Date().toISOString(),
+                    }
+                  : node,
+              ),
+            }));
+            await streamAssistantReply({
+              agent: selectedAgentSnapshot,
+              text: queuedMessage,
+              previousThread,
+            });
+            finishReplyingForAgent();
+            return;
+          }
+
           if (commandExecution.status === "blocked") {
             loopBlocked = true;
             finalReasoning =
               "Execution could not continue because the next sandbox action was blocked.";
             break;
           }
-
-          setRuntimeHealth((current) => ({
-            ...current,
-            ok: true,
-            runtime: current.runtime || "control-room-local-runtime",
-            providers: current.providers,
-            error: undefined,
-          }));
 
           const executionResult = commandExecution.result;
           executionSteps.push({
@@ -8675,31 +9889,17 @@ function App() {
           browserContextMessages,
           finalReasoning,
         });
-        const critiqued = await runCritiquedText({
-          agent: selectedAgentSnapshot,
-          prompt: expandedPrompt,
-          text: assistantText,
-          taskTreeId: taskTree.id,
-          contextMessages: [
-            ...memoryContext.runtimeMessages,
-            ...toRuntimeConversation(
-              [...previousThread, userMessage, ...executionContextMessages],
-              attachmentLibrary,
-            ),
-            ...browserContextMessages,
-          ],
-        });
 
         await streamAssistantReply({
           agent: selectedAgentSnapshot,
-          text: critiqued.text,
+          text: assistantText,
           previousThread,
         });
 
         updateTaskTree(taskTree.id, (current) => ({
           ...current,
           status: "completed",
-          finalSummary: critiqued.text,
+          finalSummary: assistantText,
           updatedAt: new Date().toISOString(),
           nodes: current.nodes.map((node) =>
             node.kind === "review"
@@ -8770,37 +9970,16 @@ function App() {
         return;
       }
 
-      setRuntimeHealth((current) => ({
-        ...current,
-        ok: true,
-        runtime: current.runtime || "control-room-local-runtime",
-        providers: current.providers,
-        error: undefined,
-      }));
-      const critiqued = await runCritiquedText({
-        agent: selectedAgentSnapshot,
-        prompt: expandedPrompt,
-        text: result.text,
-        taskTreeId: taskTree.id,
-        contextMessages: [
-          ...memoryContext.runtimeMessages,
-          ...toRuntimeConversation(
-            [...previousThread, userMessage],
-            attachmentLibrary,
-          ),
-          ...browserContextMessages,
-        ],
-      });
       await streamAssistantReply({
         agent: selectedAgentSnapshot,
-        text: critiqued.text,
+        text: result.text,
         previousThread,
       });
 
       updateTaskTree(taskTree.id, (current) => ({
         ...current,
         status: "completed",
-        finalSummary: critiqued.text,
+        finalSummary: result.text,
         updatedAt: new Date().toISOString(),
         nodes: current.nodes.map((node) => ({
           ...node,
@@ -8822,10 +10001,90 @@ function App() {
       return;
     }
 
-    const runtimeUnavailableMessage =
-      selectedAgentSnapshot.source === "custom"
-        ? "Local sandbox is not connected. Start the runtime on this computer, then try again."
-        : "This connected agent is not available right now.";
+    if (selectedAgentSnapshot.source === "custom") {
+      const bridgePrompt = [
+        `The user sent this to ${selectedAgentSnapshot.name} in the deployed Control Room.`,
+        `Original agent id: ${selectedAgentSnapshot.id}`,
+        `Workspace: ${selectedAgentSnapshot.workspace || DEFAULT_AGENT_WORKSPACE}`,
+        "",
+        expandedPrompt,
+      ].join("\n");
+      const bridgeResult = await enqueueCloudBridgeCommand({
+        agent: selectedAgentSnapshot,
+        command: `ask: ${bridgePrompt}`,
+        cwd: selectedAgentSnapshot.workspace || DEFAULT_AGENT_WORKSPACE,
+        source: "chat",
+        label: `Chat request for ${selectedAgentSnapshot.name}`,
+      });
+
+      if (bridgeResult.ok) {
+        const queuedMessage =
+          "Sent to your local bridge. Check Activity for the run status and output.";
+
+        updateLiveActivity(thinkingActivityId, (entry) => ({
+          ...entry,
+          status: "idle",
+          detail: "Sent to local bridge",
+          timestamp: new Date().toISOString(),
+        }));
+        updateTaskTree(taskTree.id, (current) => ({
+          ...current,
+          status: "running",
+          finalSummary: queuedMessage,
+          updatedAt: new Date().toISOString(),
+          nodes: current.nodes.map((node) => ({
+            ...node,
+            status: node.kind === "analysis" ? "completed" : "running",
+            updatedAt: new Date().toISOString(),
+          })),
+        }));
+        await streamAssistantReply({
+          agent: selectedAgentSnapshot,
+          text: queuedMessage,
+          previousThread,
+        });
+        updateCustomAgent(selectedAgentSnapshot.id, (agent) => ({
+          ...agent,
+          status: "active",
+          currentActivity: "Sent chat to local bridge",
+          lastSeen: new Date().toISOString(),
+        }));
+        finishReplyingForAgent();
+        return;
+      }
+
+      const bridgeError =
+        bridgeResult.error ||
+        "Cloud bridge could not accept the chat request.";
+      updateLiveActivity(thinkingActivityId, (entry) => ({
+        ...entry,
+        status: "failed",
+        detail: bridgeError,
+        timestamp: new Date().toISOString(),
+      }));
+      updateTaskTree(taskTree.id, (current) => ({
+        ...current,
+        status: "blocked",
+        updatedAt: new Date().toISOString(),
+        nodes: current.nodes.map((node) => ({
+          ...node,
+          status: node.kind === "analysis" ? "completed" : "blocked",
+          updatedAt: new Date().toISOString(),
+        })),
+      }));
+
+      setChatError(bridgeError);
+      updateCustomAgent(selectedAgentSnapshot.id, (agent) => ({
+        ...agent,
+        status: "error",
+        currentActivity: "Cloud bridge needs the ingest secret",
+        lastSeen: new Date().toISOString(),
+      }));
+      finishReplyingForAgent();
+      return;
+    }
+
+    const runtimeUnavailableMessage = "This connected agent is not available right now.";
 
     updateLiveActivity(thinkingActivityId, (entry) => ({
       ...entry,
@@ -8845,15 +10104,6 @@ function App() {
     }));
 
     setChatError(runtimeUnavailableMessage);
-
-    if (selectedAgentSnapshot.source === "custom") {
-      updateCustomAgent(selectedAgentSnapshot.id, (agent) => ({
-        ...agent,
-        status: "error",
-        currentActivity: "Local sandbox is not connected",
-        lastSeen: new Date().toISOString(),
-      }));
-    }
 
     finishReplyingForAgent();
   }
@@ -9073,7 +10323,10 @@ function App() {
   const selectedFilePreviewUrl = selectedFilePreviewArtifact?.path
     ? getRuntimeFileViewUrl(selectedFilePreviewArtifact.path)
     : "";
-  const latestAgentRun = currentAgentRuns[0] ?? null;
+  const latestAgentRun =
+    currentAgentRuns.find((run) => !runIsInFlight(run.status) || runCountsAsInFlight(run)) ??
+    currentAgentRuns[0] ??
+    null;
   const currentLiveActivities = useMemo(() => {
     if (!selectedAgent) {
       return [];
@@ -9108,9 +10361,9 @@ function App() {
     taskTrees[0] ??
     null;
   const activePlanReview =
-    planReviews.find((review) => review.id === activePlanReviewId) ??
-    planReviews.find((review) => review.status === "pending") ??
-    null;
+    activePlanReviewId
+      ? planReviews.find((review) => review.id === activePlanReviewId) ?? null
+      : null;
   const selectedKnowledgeGraph = selectedAgent
     ? knowledgeGraphByAgent[selectedAgent.id] ?? null
     : null;
@@ -9260,7 +10513,7 @@ function App() {
     commandError,
   };
   const workspaceInFlightCount = useMemo(
-    () => workspaceRuns.filter((run) => runIsInFlight(run.status)).length,
+    () => workspaceRuns.filter(runCountsAsInFlight).length,
     [workspaceRuns],
   );
   const workspaceAttentionCount = useMemo(
@@ -9526,16 +10779,12 @@ function App() {
         const recentActivities = liveActivityEntries
           .filter((entry) => entry.agentId === agent.id)
           .slice(0, 4);
-        const inFlightRuns = agentRuns.filter((run) =>
-          runIsInFlight(run.status),
-        );
         const hasError =
           agent.status === "error" || runNeedsAttention(latestRun?.status);
         const hasRunning =
           agent.status === "active" ||
           replyingAgentId === agent.id ||
-          runningActivities.length > 0 ||
-          inFlightRuns.length > 0;
+          runningActivities.length > 0;
         const needsReview =
           !hasRunning &&
           !hasError &&
@@ -9562,7 +10811,7 @@ function App() {
                 : `${agent.provider} · ${agent.model}`;
         const timeline =
           tone === "running"
-            ? `${Math.max(runningActivities.length, inFlightRuns.length, 1)} live step${Math.max(runningActivities.length, inFlightRuns.length, 1) === 1 ? "" : "s"}`
+            ? `${Math.max(runningActivities.length, 1)} live step${Math.max(runningActivities.length, 1) === 1 ? "" : "s"}`
             : tone === "review"
               ? `Waiting on your next instruction`
               : tone === "error"
@@ -9756,7 +11005,7 @@ function App() {
   }
 
   return (
-    <div className="relative flex h-[100dvh] w-full overflow-hidden bg-[radial-gradient(1200px_circle_at_70%_-10%,rgba(59,130,246,0.10),transparent_45%),#0b0f14] font-sans text-[#e6edf3]">
+    <div className="claude-theme relative flex h-[100dvh] w-full overflow-hidden bg-[#f4eee2] font-sans text-[#2f261f]">
       {/* Sidebar */}
       <Sidebar
         sidebarWidth={sidebarWidth}
@@ -9780,7 +11029,7 @@ function App() {
       />
 
       {/* Main Content Area */}
-      <main className="relative z-10 flex min-w-0 flex-1 flex-col bg-[#0e1117]">
+      <main className="relative z-10 flex min-w-0 flex-1 flex-col bg-[radial-gradient(900px_circle_at_70%_-10%,rgba(205,104,49,0.13),transparent_42%),linear-gradient(180deg,#f8f3ea_0%,#f2eadf_100%)]">
         {/* Top Bar — Minimal like Nebula */}
         <TopBanner
           selectedAgent={selectedAgent || undefined}
@@ -9802,31 +11051,35 @@ function App() {
               animate={{ opacity: 1, y: 0 }}
               exit={{ opacity: 0, y: -8 }}
               transition={{ duration: 0.22, ease: [0.22, 1, 0.36, 1] }}
-              className="relative flex items-center gap-2 overflow-hidden border-b border-[#1a2030] bg-[linear-gradient(90deg,rgba(11,17,25,0.95),rgba(15,22,33,0.92))] px-5 py-2"
+              className="relative flex items-center gap-1.5 overflow-hidden border-b border-[#e1d4c2] bg-[#fbf7ef]/85 px-3 py-1.5 sm:gap-2 sm:px-5 sm:py-2"
             >
               {/* Scanning line */}
               <motion.div
-                className="pointer-events-none absolute inset-0 h-px bg-gradient-to-r from-transparent via-[#3b82f6]/40 to-transparent"
+                className="pointer-events-none absolute inset-0 h-px bg-gradient-to-r from-transparent via-[#c96437]/35 to-transparent"
                 animate={{ x: ["-100%", "200%"] }}
                 transition={{ duration: 2.8, ease: "linear", repeat: Infinity }}
               />
-              <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-[#3b82f6] nebula-beacon" />
-              <span className="text-[11px] font-medium text-[#6e7f93]">{selectedAgent.emoji} {selectedAgent.name}</span>
-              <span className="text-[10px] text-[#3a4f63]">›</span>
-              <span className="text-[11px] text-[#4f6880]">
+              <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-[#c96437] nebula-beacon" />
+              <span className="text-[11px] font-medium text-[#6f6255]">{selectedAgent.emoji} {selectedAgent.name}</span>
+              <span className="text-[10px] text-[#9c8d7c]">›</span>
+              <span className="text-[11px] text-[#8b6a4f]">
                 {latestAgentRun.activityLabel ?? "Executing"}
               </span>
-              <span className="text-[10px] text-[#3a4f63]">›</span>
-              <span className="nebula-breadcrumb-active truncate text-[11px] font-mono">
+              <span className="text-[10px] text-[#9c8d7c]">›</span>
+              <span className="nebula-breadcrumb-active truncate text-[11px] font-mono text-[#7b4c2d]">
                 {latestAgentRun.command?.slice(0, 60)}{(latestAgentRun.command?.length ?? 0) > 60 ? "…" : ""}
               </span>
-              <span className="ml-auto shrink-0 text-[10px] text-[#3a4f63]">streaming</span>
+              <span className="ml-auto shrink-0 text-[10px] text-[#9c8d7c]">streaming</span>
             </motion.div>
           )}
         </AnimatePresence>
 
         {/* Thread View */}
-        <ScrollArea ref={chatScrollAreaRef} className="flex-1 px-6 py-6">
+        <ScrollArea
+          ref={chatScrollAreaRef}
+          viewportRef={chatScrollViewportRef}
+          className="flex-1 px-3 py-4 sm:px-6 sm:py-6"
+        >
           <div
             className={cn(
               "mx-auto flex flex-col gap-6 pb-36",
@@ -9838,11 +11091,11 @@ function App() {
             )}
           >
             {workspaceView === "channels" && (
-              <div className="mt-2 grid min-h-[780px] grid-cols-1 gap-6 xl:grid-cols-[minmax(0,1fr)_320px]">
-                <div className="flex min-h-[760px] flex-col overflow-hidden rounded-[28px] border border-white/6 bg-[linear-gradient(180deg,rgba(11,18,28,0.92),rgba(8,14,23,0.88))] shadow-[0_18px_48px_rgba(2,6,23,0.14)]">
+              <div className="mt-2 grid min-h-[780px] grid-cols-1 gap-4 sm:gap-6 xl:grid-cols-[minmax(0,1fr)_320px]">
+                <div className="flex min-h-[400px] flex-col overflow-hidden rounded-[20px] border border-white/6 bg-[linear-gradient(180deg,rgba(11,18,28,0.92),rgba(8,14,23,0.88))] shadow-[0_18px_48px_rgba(2,6,23,0.14)] sm:min-h-[760px] sm:rounded-[28px]">
                   {selectedChannel ? (
                     <>
-                      <div className="border-b border-white/6 bg-[linear-gradient(180deg,rgba(15,23,35,0.9),rgba(11,17,27,0.82))] px-7 py-6">
+                      <div className="border-b border-white/6 bg-[linear-gradient(180deg,rgba(15,23,35,0.9),rgba(11,17,27,0.82))] px-4 py-4 sm:px-7 sm:py-6">
                         <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
                           <div>
                             <div className="flex items-center gap-2.5">
@@ -9850,7 +11103,7 @@ function App() {
                                 #
                               </div>
                               <div>
-                                <p className="text-[26px] font-semibold text-[#f5fbff]">
+                                <p className="text-[20px] font-semibold text-[#f5fbff] sm:text-[26px]">
                                   {selectedChannel.title}
                                 </p>
                                 <p className="mt-1 text-[11px] uppercase tracking-[0.18em] text-[#4f6880]">
@@ -11472,7 +12725,7 @@ function App() {
                                 className={cn(
                                   "pointer-events-none absolute inset-y-3 left-0 w-px rounded-full bg-gradient-to-b opacity-80",
                                   tone.rail,
-                                  runIsInFlight(run.status) &&
+                                  runCountsAsInFlight(run) &&
                                     "command-deck-live-rail",
                                 )}
                               />
@@ -11982,22 +13235,22 @@ function App() {
                   />
                 ) : null}
                 {selectedAgent ? (
-                  <div className="overflow-hidden rounded-[28px] bg-[linear-gradient(180deg,rgba(15,21,32,0.42),rgba(9,14,22,0.08))]">
-                    <div className="flex items-center justify-between gap-3 border-b border-white/[0.05] px-4 py-4">
+                  <div className="overflow-hidden rounded-[18px] bg-transparent">
+                    <div className="flex items-center justify-between gap-3 border-b border-[#e3d7c8] px-2 py-4">
                       <div className="flex min-w-0 items-center gap-3">
                         <div
-                          className="command-deck-orb relative flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl border border-white/10 text-[16px] shadow-[inset_0_1px_0_rgba(255,255,255,0.08)]"
-                          style={{
-                            backgroundColor: selectedAgent.accent || "#3b82f6",
-                          }}
+	                          className="command-deck-orb relative flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl border border-[#d5b99f] text-[16px] text-white shadow-[0_10px_24px_rgba(120,71,35,0.12)]"
+	                          style={{
+	                            backgroundColor: selectedAgent.accent || "#c96437",
+	                          }}
                         >
                           {selectedAgent.emoji}
                         </div>
                         <div className="min-w-0">
-                          <p className="truncate text-[16px] font-semibold tracking-[-0.02em] text-[#eef6fb]">
+	                          <p className="truncate text-[16px] font-semibold tracking-[-0.02em] text-[#2f261f]">
                             {selectedAgent.name}
                           </p>
-                          <p className="truncate text-[11px] uppercase tracking-[0.18em] text-[#6e8398]">
+	                          <p className="truncate text-[11px] uppercase tracking-[0.14em] text-[#8f7b66]">
                             {selectedAgent.provider} · {selectedAgent.model}
                           </p>
                         </div>
@@ -12008,17 +13261,27 @@ function App() {
                         </Badge>
                         <button
                           type="button"
+                          onClick={handleClearSelectedAgentChat}
+                          disabled={selectedThread.length === 0}
+	                          className="inline-flex items-center gap-1.5 rounded-xl border border-[#e0d2c0] bg-[#fffaf2] px-3 py-1.5 text-[11px] text-[#6f6255] transition-colors hover:border-[#cfbda8] hover:bg-white hover:text-[#2f261f] disabled:cursor-not-allowed disabled:opacity-40"
+                          title="Clear this agent's saved chat"
+                        >
+                          <Trash2 className="h-3 w-3" />
+                          Clear chat
+                        </button>
+                        <button
+                          type="button"
                           onClick={() => {
                             setActivityDrawerTab("activity");
                             setIsActivityDrawerOpen(true);
                           }}
-                          className="rounded-xl bg-white/[0.03] px-3 py-1.5 text-[11px] text-[#c9d4df] transition-colors hover:bg-white/[0.05] hover:text-[#eef6fb]"
+	                          className="rounded-xl border border-[#e0d2c0] bg-[#fffaf2] px-3 py-1.5 text-[11px] text-[#6f6255] transition-colors hover:border-[#cfbda8] hover:bg-white hover:text-[#2f261f]"
                         >
                           Open activity
                         </button>
                       </div>
                     </div>
-                    <div className="space-y-5 px-4 py-5">
+                    <div className="space-y-5 px-2 py-5">
                       <ThreadTurns
                         messages={selectedThread}
                         selectedAgent={
@@ -12037,6 +13300,11 @@ function App() {
                         renderMessageHtml={renderMessageHtml}
                         presenceDotClasses={presenceDotClasses}
                         presenceTextClasses={presenceTextClasses}
+                        showThinkingIndicator={
+                          replyingAgentId === selectedAgent.id &&
+                          selectedThread[selectedThread.length - 1]?.role !==
+                            "assistant"
+                        }
                         onViewActivity={() => {
                           setActivityDrawerTab("activity");
                           setIsActivityDrawerOpen(true);
@@ -12077,9 +13345,9 @@ function App() {
 
         {/* Bottom Input Area */}
         {workspaceView === "chat" && (
-          <div className="absolute bottom-6 left-0 right-0 px-6">
-            <div className="relative mx-auto max-w-[900px]">
-              <div className="overflow-hidden rounded-[24px] border border-white/10 bg-[linear-gradient(180deg,rgba(18,27,39,0.94),rgba(12,18,28,0.9))] shadow-[0_22px_56px_rgba(2,6,23,0.22)] backdrop-blur-xl transition-colors focus-within:border-[#6b9cff]/28">
+              <div className="absolute bottom-3 left-0 right-0 px-3 sm:bottom-6 sm:px-6">
+                <div className="relative mx-auto max-w-[900px]">
+              <div className="overflow-hidden rounded-[22px] border border-[#d7c8b7] bg-[#fffaf2]/95 shadow-[0_18px_50px_rgba(120,71,35,0.16)] backdrop-blur-xl transition-colors focus-within:border-[#c96437]/45">
                 <input
                   ref={chatFileInputRef}
                   type="file"
@@ -12094,16 +13362,16 @@ function App() {
                   }}
                 />
                 {chatDraftAttachments.length > 0 && (
-                  <div className="flex flex-wrap gap-2 border-b border-white/8 px-4 py-3">
+                  <div className="flex flex-wrap gap-2 border-b border-[#eadfce] px-4 py-3">
                     {chatDraftAttachments.map((attachment) => (
                       <div
                         key={attachment.id}
-                        className="inline-flex max-w-[280px] items-center gap-2 rounded-2xl border border-white/10 bg-white/[0.04] px-3 py-2 text-[11px] text-[#d9e4ee]"
+	                        className="inline-flex max-w-[280px] items-center gap-2 rounded-2xl border border-[#e0d2c0] bg-[#f7efe3] px-3 py-2 text-[11px] text-[#4c4035]"
                       >
                         {attachment.kind === "image" ? (
-                          <ImageIcon className="h-3.5 w-3.5 text-[#8fd3ff]" />
+	                          <ImageIcon className="h-3.5 w-3.5 text-[#c96437]" />
                         ) : (
-                          <FileText className="h-3.5 w-3.5 text-[#b5c7d8]" />
+	                          <FileText className="h-3.5 w-3.5 text-[#8f7b66]" />
                         )}
                         <span className="truncate">{attachment.name}</span>
                         <button
@@ -12111,7 +13379,7 @@ function App() {
                           onClick={() =>
                             removeDraftAttachment("chat", attachment.id)
                           }
-                          className="text-[#6e7f93] transition-colors hover:text-[#edf4f8]"
+	                          className="text-[#8f7b66] transition-colors hover:text-[#2f261f]"
                         >
                           <X className="h-3.5 w-3.5" />
                         </button>
@@ -12123,7 +13391,7 @@ function App() {
                   value={chatDraft}
                   onChange={(e) => setChatDraft(e.target.value)}
                   placeholder="Ask this agent to inspect code, run checks, debug, or delegate work..."
-                  className="min-h-[72px] w-full resize-none bg-transparent px-5 py-4 text-[14px] text-[#edf4f8] placeholder-[#70849a] focus:outline-none"
+                  className="min-h-[56px] w-full resize-none bg-transparent px-3 py-3 text-[14px] leading-6 text-[#2f261f] placeholder-[#9a8978] focus:outline-none sm:min-h-[72px] sm:px-5 sm:py-4 sm:text-[15px] sm:leading-7"
                   onPaste={(event) => {
                     if (event.clipboardData.files.length > 0) {
                       event.preventDefault();
@@ -12143,25 +13411,25 @@ function App() {
                   }}
                 />
                 {chatAttachmentError && (
-                  <div className="border-t border-white/8 px-4 py-3 text-[11px] text-[#f5a1a1]">
+                  <div className="border-t border-[#eadfce] px-4 py-3 text-[11px] text-[#b84a35]">
                     {chatAttachmentError}
                   </div>
                 )}
-                <div className="flex flex-col gap-3 border-t border-white/8 px-4 py-3 md:flex-row md:items-center md:justify-between">
+                <div className="flex flex-col gap-3 border-t border-[#eadfce] px-4 py-3 md:flex-row md:items-center md:justify-between">
                   <div className="flex flex-wrap items-center gap-2 text-[11px]">
-                    <span className="inline-flex items-center gap-1 rounded-full border border-white/10 bg-white/[0.03] px-2.5 py-1 text-[#9fb0c3]">
+	                    <span className="inline-flex items-center gap-1 rounded-full border border-[#e0d2c0] bg-[#f7efe3] px-2.5 py-1 text-[#7d6b5a]">
                       {selectedAgent?.provider || "OpenAI"} ·{" "}
                       {selectedAgent?.model || "GPT-4"}
                     </span>
                     {selectedAgent?.permissions.terminal && (
-                      <span className="inline-flex items-center gap-1 rounded-full border border-[#818cf8]/16 bg-[#818cf8]/8 px-2.5 py-1 text-[#c7d2fe]">
+	                      <span className="inline-flex items-center gap-1 rounded-full border border-[#c96437]/25 bg-[#c96437]/10 px-2.5 py-1 text-[#9a4f2c]">
                         <Terminal className="h-3 w-3" /> Sandbox
                       </span>
                     )}
                     <button
                       type="button"
                       onClick={() => chatFileInputRef.current?.click()}
-                      className="inline-flex items-center gap-1 rounded-full border border-white/10 bg-white/[0.03] px-2.5 py-1 text-[#9fb0c3] transition-colors hover:border-white/16 hover:bg-white/[0.05] hover:text-[#edf4f8]"
+	                      className="inline-flex items-center gap-1 rounded-full border border-[#e0d2c0] bg-[#f7efe3] px-2.5 py-1 text-[#7d6b5a] transition-colors hover:border-[#cfbda8] hover:bg-white hover:text-[#2f261f]"
                     >
                       <Paperclip className="h-3 w-3" /> Attach
                     </button>
@@ -12174,7 +13442,7 @@ function App() {
                           chatDraftAttachments.length === 0) ||
                         isReplying
                       }
-                      className="inline-flex items-center gap-2 rounded-xl bg-[linear-gradient(180deg,rgba(59,130,246,0.95),rgba(37,99,235,0.85))] px-3.5 py-2 text-[12px] font-medium text-white shadow-[0_16px_34px_rgba(37,99,235,0.28)] transition-all hover:brightness-110 disabled:opacity-50"
+                      className="inline-flex items-center gap-2 rounded-xl bg-[linear-gradient(180deg,#d97745,#b95d31)] px-3.5 py-2 text-[12px] font-medium text-white shadow-[0_14px_30px_rgba(185,93,49,0.24)] transition-all hover:brightness-105 disabled:opacity-50"
                     >
                       <Send className="h-3.5 w-3.5" />
                       Send
@@ -12187,7 +13455,7 @@ function App() {
         )}
         {workspaceView === "observability" && (
           <div className="space-y-4 mt-2">
-            <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
               <div className="rounded-xl border border-[#1e252e] bg-[#161b22]/50 p-3">
                 <p className="text-[11px] uppercase tracking-wider text-[#8b949e]">
                   Total Runs
@@ -12654,12 +13922,12 @@ function App() {
             setIsCreateAgentOpen(open);
           }}
         >
-          <DialogContent className="flex max-h-[92vh] w-[min(92vw,56rem)] max-w-3xl flex-col overflow-hidden border border-[#30363d] bg-[#0d1117] p-0 text-[#c9d1d9]">
-            <DialogHeader className="shrink-0 border-b border-[#30363d] px-6 py-5">
-              <DialogTitle className="text-[#e6edf3]">
+          <DialogContent className="claude-agent-dialog flex max-h-[92vh] w-[min(92vw,56rem)] max-w-3xl flex-col overflow-hidden border border-[#d7c8b7] bg-[#fbf7ef] p-0 text-[#2f261f] shadow-[0_24px_80px_rgba(120,71,35,0.22)]">
+            <DialogHeader className="shrink-0 border-b border-[#e0d2c0] bg-[#fffaf2] px-6 py-5">
+              <DialogTitle className="text-[#2f261f]">
                 {editingAgentId ? "Edit Agent" : "Create Custom Agent"}
               </DialogTitle>
-              <DialogDescription className="text-[#8b949e]">
+              <DialogDescription className="text-[#7d6b5a]">
                 {editingAgentId
                   ? "Update provider, model, workspace, and permissions for your specialist."
                   : "Define provider, model, workspace, and permissions for your specialist."}
@@ -12676,7 +13944,7 @@ function App() {
               <div className="min-h-0 flex-1 space-y-4 overflow-y-auto px-6 py-5">
                 <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
                   <div>
-                    <p className="mb-1 text-xs text-[#8b949e]">Agent name</p>
+                    <p className="mb-1 text-xs text-[#8f7b66]">Agent name</p>
                     <Input
                       value={agentDraft.name}
                       onChange={(event) =>
@@ -12686,11 +13954,11 @@ function App() {
                         }))
                       }
                       placeholder="Builder"
-                      className="h-9 rounded-md bg-[#161b22] border-[#30363d]"
+                      className="h-9 rounded-xl border-[#d7c8b7] bg-[#fffaf2] text-[#2f261f] placeholder-[#9a8978] focus:border-[#c96437]/50 focus:ring-[#c96437]/20"
                     />
                   </div>
                   <div>
-                    <p className="mb-1 text-xs text-[#8b949e]">Role</p>
+                    <p className="mb-1 text-xs text-[#8f7b66]">Role</p>
                     <Input
                       value={agentDraft.role}
                       onChange={(event) =>
@@ -12700,11 +13968,11 @@ function App() {
                         }))
                       }
                       placeholder="Implementation Engineer"
-                      className="h-9 rounded-md bg-[#161b22] border-[#30363d]"
+                      className="h-9 rounded-xl border-[#d7c8b7] bg-[#fffaf2] text-[#2f261f] placeholder-[#9a8978] focus:border-[#c96437]/50 focus:ring-[#c96437]/20"
                     />
                   </div>
                   <div>
-                    <p className="mb-1 text-xs text-[#8b949e]">Emoji</p>
+                    <p className="mb-1 text-xs text-[#8f7b66]">Emoji</p>
                     <Input
                       value={agentDraft.emoji}
                       onChange={(event) =>
@@ -12714,16 +13982,16 @@ function App() {
                         }))
                       }
                       placeholder="🤖"
-                      className="h-9 rounded-md bg-[#161b22] border-[#30363d]"
+                      className="h-9 rounded-xl border-[#d7c8b7] bg-[#fffaf2] text-[#2f261f] placeholder-[#9a8978] focus:border-[#c96437]/50 focus:ring-[#c96437]/20"
                     />
                   </div>
                 </div>
 
-                <div className="rounded-lg border border-[#30363d] bg-[#161b22]/60 p-3">
+                <div className="rounded-lg border border-[#d7c8b7] bg-[#fffaf2] p-3">
                   <div className="mb-2 flex items-center justify-between gap-3">
                     <div>
-                      <p className="text-xs text-[#8b949e]">Provider presets</p>
-                      <p className="mt-1 text-[11px] text-[#6e7681]">
+                      <p className="text-xs text-[#8f7b66]">Provider presets</p>
+                      <p className="mt-1 text-[11px] text-[#9a8978]">
                         Showing {visibleProviderPresets.length} of{" "}
                         {providerPresets.length}. Current provider models are
                         surfaced first.
@@ -12735,7 +14003,7 @@ function App() {
                         onClick={() =>
                           setShowAllProviderPresets(!showAllProviderPresets)
                         }
-                        className="rounded-md border border-[#30363d] bg-[#0d1117] px-2.5 py-1.5 text-[11px] text-[#9da7b2] transition-colors hover:text-[#c9d1d9]"
+                        className="rounded-md border border-[#d7c8b7] bg-[#fffaf2] px-2.5 py-1.5 text-[11px] text-[#7d6b5a] transition-colors hover:text-[#4c4035]"
                       >
                         {showAllProviderPresets
                           ? "Show less"
@@ -12762,11 +14030,11 @@ function App() {
                           }))
                         }
                         className={cn(
-                          "max-w-full rounded-md border px-2.5 py-1.5 text-left text-[11px] transition-colors",
+                          "max-w-full rounded-xl border px-2.5 py-1.5 text-left text-[11px] transition-colors",
                           agentDraft.provider === preset.provider &&
                             agentDraft.model === preset.model
-                            ? "border-[#58a6ff] bg-[#1f6feb]/20 text-[#79c0ff]"
-                            : "border-[#30363d] bg-[#0d1117] text-[#9da7b2] hover:text-[#c9d1d9]",
+                            ? "border-[#c96437] bg-[#c96437]/12 text-[#8f4b2d]"
+                            : "border-[#d7c8b7] bg-[#fffaf2] text-[#7d6b5a] hover:text-[#4c4035]",
                         )}
                       >
                         <span className="block break-words">
@@ -12779,7 +14047,7 @@ function App() {
 
                 <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
                   <div>
-                    <p className="mb-1 text-xs text-[#8b949e]">Provider</p>
+                    <p className="mb-1 text-xs text-[#8f7b66]">Provider</p>
                     <Select
                       value={agentDraft.provider}
                       onValueChange={(value) =>
@@ -12789,10 +14057,10 @@ function App() {
                         }))
                       }
                     >
-                      <SelectTrigger className="h-9 rounded-md bg-[#161b22] border-[#30363d]">
+                      <SelectTrigger className="h-9 rounded-xl border-[#d7c8b7] bg-[#fffaf2] text-[#2f261f] placeholder-[#9a8978] focus:border-[#c96437]/50 focus:ring-[#c96437]/20">
                         <SelectValue placeholder="Provider" />
                       </SelectTrigger>
-                      <SelectContent>
+                      <SelectContent className="claude-select-content border-[#d7c8b7] bg-[#fffaf2] text-[#2f261f] shadow-[0_18px_50px_rgba(120,71,35,0.18)]">
                         {Array.from(
                           new Set(
                             providerPresets.map((preset) => preset.provider),
@@ -12806,7 +14074,7 @@ function App() {
                     </Select>
                   </div>
                   <div>
-                    <p className="mb-1 text-xs text-[#8b949e]">Model</p>
+                    <p className="mb-1 text-xs text-[#8f7b66]">Model</p>
                     <Input
                       value={agentDraft.model}
                       onChange={(event) =>
@@ -12816,14 +14084,14 @@ function App() {
                         }))
                       }
                       placeholder="gpt-4.1"
-                      className="h-9 rounded-md bg-[#161b22] border-[#30363d]"
+                      className="h-9 rounded-xl border-[#d7c8b7] bg-[#fffaf2] text-[#2f261f] placeholder-[#9a8978] focus:border-[#c96437]/50 focus:ring-[#c96437]/20"
                     />
                   </div>
                 </div>
 
                 <div className="space-y-3">
                   <div>
-                    <p className="mb-1 text-xs text-[#8b949e]">Objective</p>
+                    <p className="mb-1 text-xs text-[#8f7b66]">Objective</p>
                     <textarea
                       value={agentDraft.objective}
                       onChange={(event) =>
@@ -12833,11 +14101,11 @@ function App() {
                         }))
                       }
                       placeholder="What this agent should own."
-                      className="min-h-[70px] w-full resize-none rounded-md border border-[#30363d] bg-[#161b22] px-3 py-2 text-sm text-[#e6edf3] placeholder-[#6e7681] focus:outline-none focus:ring-2 focus:ring-[#1f6feb]/35"
+                      className="min-h-[70px] w-full resize-none rounded-md border border-[#d7c8b7] bg-[#fffaf2] px-3 py-2 text-sm text-[#2f261f] placeholder-[#9a8978] focus:outline-none focus:ring-2 focus:ring-[#c96437]/25"
                     />
                   </div>
                   <div>
-                    <p className="mb-1 text-xs text-[#8b949e]">System prompt</p>
+                    <p className="mb-1 text-xs text-[#8f7b66]">System prompt</p>
                     <textarea
                       value={agentDraft.systemPrompt}
                       onChange={(event) =>
@@ -12847,14 +14115,14 @@ function App() {
                         }))
                       }
                       placeholder="You are a specialist agent..."
-                      className="min-h-[90px] w-full resize-none rounded-md border border-[#30363d] bg-[#161b22] px-3 py-2 text-sm text-[#e6edf3] placeholder-[#6e7681] focus:outline-none focus:ring-2 focus:ring-[#1f6feb]/35"
+                      className="min-h-[90px] w-full resize-none rounded-md border border-[#d7c8b7] bg-[#fffaf2] px-3 py-2 text-sm text-[#2f261f] placeholder-[#9a8978] focus:outline-none focus:ring-2 focus:ring-[#c96437]/25"
                     />
                   </div>
                 </div>
 
                 <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
                   <div className="md:col-span-2">
-                    <p className="mb-1 text-xs text-[#8b949e]">
+                    <p className="mb-1 text-xs text-[#8f7b66]">
                       Workspace path
                     </p>
                     <Input
@@ -12866,11 +14134,11 @@ function App() {
                         }))
                       }
                       placeholder={DEFAULT_AGENT_WORKSPACE}
-                      className="h-9 rounded-md bg-[#161b22] border-[#30363d]"
+                      className="h-9 rounded-xl border-[#d7c8b7] bg-[#fffaf2] text-[#2f261f] placeholder-[#9a8978] focus:border-[#c96437]/50 focus:ring-[#c96437]/20"
                     />
                   </div>
                   <div>
-                    <p className="mb-1 text-xs text-[#8b949e]">Sandbox mode</p>
+                    <p className="mb-1 text-xs text-[#8f7b66]">Sandbox mode</p>
                     <Select
                       value={agentDraft.sandboxMode}
                       onValueChange={(value) =>
@@ -12880,10 +14148,10 @@ function App() {
                         }))
                       }
                     >
-                      <SelectTrigger className="h-9 rounded-md bg-[#161b22] border-[#30363d]">
+                      <SelectTrigger className="h-9 rounded-xl border-[#d7c8b7] bg-[#fffaf2] text-[#2f261f] placeholder-[#9a8978] focus:border-[#c96437]/50 focus:ring-[#c96437]/20">
                         <SelectValue placeholder="Sandbox mode" />
                       </SelectTrigger>
-                      <SelectContent>
+                      <SelectContent className="claude-select-content border-[#d7c8b7] bg-[#fffaf2] text-[#2f261f] shadow-[0_18px_50px_rgba(120,71,35,0.18)]">
                         <SelectItem value="workspace-write">
                           workspace-write
                         </SelectItem>
@@ -12895,7 +14163,7 @@ function App() {
                 </div>
 
                 <div>
-                  <p className="mb-2 text-xs text-[#8b949e]">Permissions</p>
+                  <p className="mb-2 text-xs text-[#8f7b66]">Permissions</p>
                   <div className="flex flex-wrap gap-2">
                     <PermissionToggle
                       icon={Terminal}
@@ -12956,20 +14224,20 @@ function App() {
                 </div>
 
                 <div>
-                  <p className="mb-2 text-xs text-[#8b949e]">
+                  <p className="mb-2 text-xs text-[#8f7b66]">
                     Enabled tool surface
                   </p>
                   <div className="grid grid-cols-1 gap-2 md:grid-cols-2">
                     {agentDraftCapabilityGroups.map((group) => (
                       <div
                         key={group.category}
-                        className="rounded-md border border-[#30363d] bg-[#161b22]/70 p-3"
+                        className="rounded-md border border-[#d7c8b7] bg-[#fffaf2] p-3"
                       >
                         <div className="mb-2 flex items-center justify-between gap-3">
-                          <span className="text-[12px] font-medium text-[#e6edf3]">
+                          <span className="text-[12px] font-medium text-[#2f261f]">
                             {group.label}
                           </span>
-                          <span className="text-[10px] text-[#6e8398]">
+                          <span className="text-[10px] text-[#9a8978]">
                             {group.tools.length} tools
                           </span>
                         </div>
@@ -12977,7 +14245,7 @@ function App() {
                           {group.tools.map((tool) => (
                             <span
                               key={tool.name}
-                              className="inline-flex rounded-full border border-white/8 bg-[#0d1117] px-2 py-0.5 text-[10px] text-[#9fb0c3]"
+                              className="inline-flex rounded-full border border-[#e0d2c0] bg-[#f7efe3] px-2 py-0.5 text-[10px] text-[#7d6b5a]"
                             >
                               {tool.name}
                             </span>
@@ -12986,7 +14254,7 @@ function App() {
                       </div>
                     ))}
                   </div>
-                  <p className="mt-2 text-[11px] text-[#70849a]">
+                  <p className="mt-2 text-[11px] text-[#9a8978]">
                     Browser mode currently covers web fetch and text extraction,
                     alongside generic HTTP requests. Terminal controls the
                     sandbox lane for real workspace execution.
@@ -12994,11 +14262,12 @@ function App() {
                 </div>
               </div>
 
-              <div className="flex shrink-0 justify-end gap-2 border-t border-[#30363d] px-6 py-4">
+              <div className="flex shrink-0 justify-end gap-2 border-t border-[#e0d2c0] bg-[#fffaf2] px-6 py-4">
                 <Button
                   type="button"
                   variant="ghost"
                   size="sm"
+                  className="border-[#e0d2c0] text-[#7d6b5a] hover:border-[#d7c8b7] hover:bg-[#f7efe3] hover:text-[#2f261f]"
                   onClick={() => {
                     setIsCreateAgentOpen(false);
                     setEditingAgentId(null);
@@ -13007,7 +14276,12 @@ function App() {
                 >
                   Cancel
                 </Button>
-                <Button type="submit" variant="secondary" size="sm">
+                <Button
+                  type="submit"
+                  variant="secondary"
+                  size="sm"
+                  className="border-[#c96437]/35 bg-[#c96437]/10 text-[#8f4b2d] hover:border-[#c96437]/45 hover:bg-[#c96437]/15"
+                >
                   {editingAgentId ? "Save Changes" : "Create Agent"}
                 </Button>
               </div>
@@ -13635,7 +14909,7 @@ function App() {
                 setIsActivityDrawerOpen(true);
                 setActivityToast(null);
               }}
-              className="absolute bottom-[100px] right-8 z-50 flex items-center gap-2 rounded-full border border-white/12 bg-[linear-gradient(180deg,rgba(30,41,59,0.96),rgba(15,23,42,0.92))] px-3 py-1.5 shadow-[0_8px_32px_rgba(0,0,0,0.3)] backdrop-blur-xl transition-all hover:bg-white/[0.08]"
+              className="absolute bottom-[80px] right-3 z-50 flex items-center gap-2 rounded-full border border-white/12 bg-[linear-gradient(180deg,rgba(30,41,59,0.96),rgba(15,23,42,0.92))] px-3 py-1.5 shadow-[0_8px_32px_rgba(0,0,0,0.3)] backdrop-blur-xl transition-all hover:bg-white/[0.08] sm:bottom-[100px] sm:right-8"
             >
               <div className="h-1.5 w-1.5 shrink-0 rounded-full bg-[#0ea5e9] shadow-[0_0_8px_rgba(14,165,233,0.8)]" />
               <span className="text-[11px] font-medium text-[#edf4f8] whitespace-nowrap">New activity</span>
@@ -13778,7 +15052,7 @@ function PermissionToggle({
     <Toggle
       pressed={pressed}
       onPressedChange={onPressedChange}
-      className="gap-2"
+      className="gap-2 border-[#d7c8b7] bg-[#fffaf2] text-[#7d6b5a] hover:border-[#cfbda8] hover:bg-[#f7efe3] hover:text-[#2f261f] data-[state=on]:border-[#c96437]/45 data-[state=on]:bg-[#c96437]/12 data-[state=on]:text-[#8f4b2d]"
     >
       <Icon className="h-4 w-4" />
       {label}
