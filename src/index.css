@@ -137,6 +137,16 @@
     font-size: 16px;
     line-height: 1.72;
     letter-spacing: 0;
+    overflow-wrap: break-word;
+    word-break: break-word;
+  }
+
+  .chat-message-markdown table {
+    width: 100%;
+    border-collapse: collapse;
+    display: block;
+    overflow-x: auto;
+    margin: 1rem 0;
   }
 
   .chat-message-markdown :where(p, ul, ol, pre, blockquote, h1, h2, h3) {
