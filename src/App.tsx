@@ -3,25 +3,36 @@ import { AnimatePresence, motion } from "framer-motion";
 import {
   Activity,
   Bot,
+  CalendarDays,
   Check,
   ChevronLeft,
   ChevronRight,
+  Cloud,
   Clock3,
   Cpu,
+  Database as DatabaseIcon,
   FileText,
   FolderOpen,
   Globe,
   Github,
+  GitPullRequest,
   Image as ImageIcon,
+  Inbox,
   Key,
+  Link2,
+  Mail,
   MessageCircle,
   Paperclip,
   Plus,
+  PlayCircle,
+  PlugZap,
+  Radio,
   ScrollText,
   Send,
   Server,
   Settings2,
   ShieldCheck,
+  Slack,
   Sparkles,
   Terminal,
   Trash2,
@@ -30,6 +41,9 @@ import {
   X,
 } from "lucide-react";
 import DOMPurify from "dompurify";
+import { DelegationsView } from "@/views/DelegationsView";
+import { ObservabilityView } from "@/views/ObservabilityView";
+import { AccountsView } from "@/views/AccountsView";
 import { marked } from "marked";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -57,10 +71,13 @@ import {
 import {
   cancelAgentRuntimeRun,
   createBrowserUseSession,
+  disconnectConnector,
   executeAgentRuntimeCommandStream,
+  fetchLatestGmailMessages,
   getBrowserUseSession,
   getAgentRuntimeHealth,
   getRuntimeFileViewUrl,
+  listConnectorAuth,
   listBrowserUseSessions,
   listAgentRuntimeRuns,
   hasAgentRuntime,
@@ -72,6 +89,8 @@ import {
   subscribeToRuntimeEvents,
   retryRun,
   resumeRun,
+  startConnectorOAuth,
+  storeConnectorToken,
   type BrowserUseSession,
   type RuntimeArtifact,
   type RuntimeChatMessage,
@@ -134,6 +153,7 @@ import {
   type VerifierReview,
 } from "@/lib/orchestration";
 import {
+  createAutomation,
   listAutomations,
   listAutomationRuns,
   triggerAutomation,
@@ -142,6 +162,7 @@ import {
   type AutomationRun,
 } from "@/lib/automations";
 import { issueAgentCommand } from "@/lib/commands";
+import { NVIDIA_MODEL_PRESETS } from "@/lib/nvidia-models";
 
 import { Sidebar } from "./components/layout/Sidebar";
 import { TopBanner } from "./components/layout/TopBanner";
@@ -162,3196 +183,134 @@ import { CommandPalette } from "./components/ui/CommandPalette";
 import { useAppStore, useChatStore, useReasoningStore, useRouterStore } from "./store";
 import { useOrchestrationStore, usePhase3Store, usePhase4Store } from "./store";
 
-
-
-export type AgentSource = "custom" | "connected";
-export type SandboxMode = "none" | "read-only" | "workspace-write";
-export type WorkspaceView =
-  | "chat"
-  | "channels"
-  | "council"
-  | "delegations"
-  | "activity"
-  | "accounts"
-  | "observability";
-export type DelegationStatus = "queued" | "active" | "blocked" | "done";
-export type DelegationPriority = "low" | "medium" | "high";
-export type DelegationExecutionMode = "manual" | "thread" | "command";
-export type CommandExecutionSource = "runner" | "delegation" | "agent";
-export type PermissionKey = "terminal" | "browser" | "files" | "git" | "delegation";
-export type ActivityKind =
-  | "thinking"
-  | "sandbox"
-  | "typing"
-  | "delegation"
-  | "search"
-  | "read"
-  | "git"
-  | "test"
-  | "build"
-  | "install"
-  | "browser";
-export type ChannelStatus = "active" | "blocked" | "done";
-export type ChannelMessageKind = "message" | "task" | "handoff" | "result" | "system";
-export type PresenceTone = "running" | "review" | "error" | "idle";
-
-export interface AgentPermissions {
-  terminal: boolean;
-  browser: boolean;
-  files: boolean;
-  git: boolean;
-  delegation: boolean;
-}
-
-export interface WorkspaceAgent extends Agent {
-  source: AgentSource;
-  provider: string;
-  model: string;
-  objective: string;
-  systemPrompt: string;
-  specialties: string[];
-  tools: string[];
-  workspace: string;
-  sandboxMode: SandboxMode;
-  permissions: AgentPermissions;
-}
-
-export interface DelegationTask {
-  id: string;
-  title: string;
-  fromAgentId: string;
-  assigneeId: string;
-  status: DelegationStatus;
-  priority: DelegationPriority;
-  notes: string;
-  executionMode: DelegationExecutionMode;
-  payload: string;
-  cwd: string;
-  updatedAt: string;
-  inputContract?: Record<string, unknown>;
-  outputContract?: Record<string, unknown>;
-  parentDelegationId?: string | null;
-  channelId?: string | null;
-  dependencyIds?: string[];
-  cancellationReason?: string | null;
-}
-
-export interface ChatMessage {
-  id: string;
-  agentId: string;
-  role: "user" | "assistant" | "system";
-  sender: string;
-  content: string;
-  contextText?: string;
-  attachmentIds?: string[];
-  timestamp: string;
-}
-
-export interface CollaborationChannel {
-  id: string;
-  title: string;
-  objective: string;
-  leadAgentId: string;
-  memberAgentIds: string[];
-  memberTargets: Record<string, string>;
-  status: ChannelStatus;
-  linkedDelegationIds: string[];
-  lastSummary: string;
-  updatedAt: string;
-}
-
-export interface ChannelMessage {
-  id: string;
-  channelId: string;
-  sender: string;
-  senderId?: string | null;
-  role: "user" | "agent" | "system";
-  kind: ChannelMessageKind;
-  content: string;
-  contextText?: string;
-  attachmentIds?: string[];
-  timestamp: string;
-}
-
-export interface ComposerAttachment {
-  id: string;
-  name: string;
-  mimeType: string;
-  kind: "image" | "text" | "document";
-  size: number;
-  previewUrl?: string;
-  textContent?: string;
-  warning?: string;
-}
-
-export interface CommandRun {
-  id: string;
-  agentId: string;
-  command: string;
-  cwd: string;
-  status:
-    | "queued"
-    | "planning"
-    | "running"
-    | "waiting_for_approval"
-    | "blocked"
-    | "completed"
-    | "failed"
-    | "canceled";
-  phase?:
-    | "queued"
-    | "planning"
-    | "executing"
-    | "waiting_for_approval"
-    | "blocked"
-    | "completed"
-    | "failed"
-    | "canceled";
-  exitCode: number | null;
-  stdout: string;
-  stderr: string;
-  timedOut: boolean;
-  durationMs: number | null;
-  createdAt: string;
-  completedAt?: string | null;
-  canceledAt?: string | null;
-  runtimeRunId?: string;
-  activityKind?: ActivityKind;
-  activityLabel?: string;
-  activitySummary?: string;
-  agentName?: string;
-  error?: string;
-  retryCount?: number;
-  maxRetries?: number;
-  parentRunId?: string | null;
-  retryOfRunId?: string | null;
-  model?: string | null;
-  provider?: string | null;
-  artifacts?: RuntimeArtifact[] | null;
-}
-
-export interface CommandReview {
-  status: "safe" | "approval" | "blocked";
-  reasons: string[];
-}
-
-export interface PendingCommandApproval {
-  agentId: string;
-  queueId?: string | null;
-  command: string;
-  cwd: string;
-  source: CommandExecutionSource;
-  taskId: string | null;
-  ownerName: string | null;
-  taskTitle: string | null;
-  reasons: string[];
-  requestedAt: string;
-}
-
-export interface ToolApprovalState {
-  request: ToolApprovalRequest;
-  isResolving: boolean;
-  editMode: boolean;
-  editedParameters: Record<string, unknown>;
-}
-
-export interface AgentExecutionPlan {
-  mode: "chat" | "command";
-  command: string;
-  cwd: string;
-  reasoning: string;
-}
-
-export interface ExecutionStepResult {
-  command: string;
-  cwd: string;
-  result: {
-    ok: boolean;
-    exitCode?: number;
-    stdout?: string;
-    stderr?: string;
-    timedOut?: boolean;
-    durationMs?: number;
-    cwd?: string;
-    error?: string;
-    artifacts?: RuntimeArtifact[] | null;
-  };
-}
-
-interface BridgeCommandRow {
-  id: string;
-  status: "pending" | "dispatched" | "running" | "completed" | "failed" | "canceled";
-  result?: {
-    exitCode?: number;
-    stdout?: string;
-    stderr?: string;
-    timedOut?: boolean;
-    durationMs?: number;
-    cwd?: string;
-    error?: string;
-    artifacts?: RuntimeArtifact[] | null;
-  } | null;
-  updated_at?: string;
-}
-
-type CommandExecutionRequestResult =
-  | { status: "completed"; result: RuntimeExecuteResult }
-  | { status: "queued"; result: RuntimeExecuteResult }
-  | { status: "waiting_for_approval" }
-  | { status: "blocked" };
-
-export interface LiveActivityEntry {
-  id: string;
-  agentId: string;
-  kind: ActivityKind;
-  label: string;
-  detail: string;
-  status: "running" | "completed" | "failed" | "idle";
-  timestamp: string;
-}
-
-export interface AgentDraft {
-  name: string;
-  role: string;
-  emoji: string;
-  provider: string;
-  model: string;
-  objective: string;
-  systemPrompt: string;
-  specialties: string;
-  skills: string;
-  workspace: string;
-  sandboxMode: SandboxMode;
-  terminal: boolean;
-  browser: boolean;
-  files: boolean;
-  git: boolean;
-  delegation: boolean;
-}
-
-export interface ChannelDraft {
-  title: string;
-  objective: string;
-  leadAgentId: string;
-  memberAgentIds: string[];
-  memberTargets: Record<string, string>;
-}
-
-export interface DelegationDraft {
-  title: string;
-  assigneeId: string;
-  priority: DelegationPriority;
-  notes: string;
-  executionMode: DelegationExecutionMode;
-  payload: string;
-  cwd: string;
-  autoDispatch: boolean;
-}
-
-export interface GithubDeviceAuthSession {
-  deviceCode: string;
-  userCode: string;
-  verificationUri: string;
-  verificationUriComplete: string;
-  interval: number;
-  expiresAt: number;
-}
-
-export type WorkspaceAgentRow =
-  Database["public"]["Tables"]["workspace_agents"]["Row"];
-export type WorkspaceDelegationRow =
-  Database["public"]["Tables"]["workspace_delegations"]["Row"];
-export type WorkspaceMessageRow =
-  Database["public"]["Tables"]["workspace_messages"]["Row"];
-export type WorkspaceCommandRunRow =
-  Database["public"]["Tables"]["workspace_command_runs"]["Row"];
-export type WorkspaceDispatcherDecisionRow =
-  Database["public"]["Tables"]["workspace_dispatcher_decisions"]["Row"];
-export type WorkspaceContextPackageRow =
-  Database["public"]["Tables"]["workspace_context_packages"]["Row"];
-export type WorkspaceTaskTreeRow =
-  Database["public"]["Tables"]["workspace_task_trees"]["Row"];
-export type WorkspaceVerifierReviewRow =
-  Database["public"]["Tables"]["workspace_verifier_reviews"]["Row"];
-export type WorkspacePlanReviewRow =
-  Database["public"]["Tables"]["workspace_plan_reviews"]["Row"];
-export type WorkspaceCircuitBreakerEventRow =
-  Database["public"]["Tables"]["workspace_circuit_breaker_events"]["Row"];
-export type WorkspaceKnowledgeGraphRow =
-  Database["public"]["Tables"]["workspace_knowledge_graphs"]["Row"];
-export type WorkspaceToolDraftRow =
-  Database["public"]["Tables"]["workspace_tool_drafts"]["Row"];
-
-const STORAGE_KEYS = {
-  customAgents: "control-room.custom-agents",
-  delegations: "control-room.delegations",
-  messages: "control-room.messages",
-  channels: "control-room.channels",
-  channelMessages: "control-room.channel-messages",
-  commandRuns: "control-room.command-runs",
-  selectedAgentId: "control-room.selected-agent-id",
-  selectedChannelId: "control-room.selected-channel-id",
-  workspaceView: "control-room.workspace-view",
-} as const;
-
-const PERSONAL_WORKSPACE_ID = "default";
-const CONVERSATION_RESET_VERSION = "2026-04-27-fresh-agent-chats";
-const STORAGE_MAINTENANCE_VERSION = "2026-04-27-fresh-agent-chats";
-
-const blockedCommandPatterns = [
-  /\brm\s+-rf\s+\/\b/i,
-  /\bsudo\b/i,
-  /\bshutdown\b/i,
-  /\breboot\b/i,
-  /\bmkfs\b/i,
-  /\bdd\b/i,
-  /\bchmod\s+-R\s+777\b/i,
-  /\bchown\b/i,
-  /\bgit\s+reset\s+--hard\b/i,
-  /\bgit\s+clean\s+-fd\b/i,
-];
-
-const readOnlyCommands = new Set([
-  "pwd",
-  "ls",
-  "cat",
-  "head",
-  "tail",
-  "sed",
-  "rg",
-  "find",
-  "git",
-  "wc",
-  "stat",
-  "which",
-  "echo",
-]);
-
-const shellRiskPattern = /[|;&><`$]/;
-const TRUSTED_PERSONAL_TERMINAL_ACCESS = true;
-
-const commandApprovalPatterns = [
-  {
-    pattern: /\b(rm|mv|cp|mkdir|touch|install|tee)\b/i,
-    reason: "It can change files inside the workspace.",
-  },
-  { pattern: /\bsed\s+-i\b/i, reason: "It edits files in place." },
-  {
-    pattern: /\bchmod\b|\bchown\b/i,
-    reason: "It changes file permissions or ownership.",
-  },
-  {
-    pattern:
-      /\bgit\s+(add|commit|checkout|switch|merge|rebase|clean|reset|restore|stash|apply)\b/i,
-    reason: "It changes git state or rewrites the working tree.",
-  },
-  {
-    pattern: /\b(npm|pnpm|yarn|bun)\s+(install|add|remove|update|upgrade)\b/i,
-    reason: "It changes dependencies or lockfiles.",
-  },
-  {
-    pattern: /\b(pip|pip3|uv)\s+(install|sync|add|remove)\b/i,
-    reason: "It changes the Python environment or project state.",
-  },
-  {
-    pattern: /\b(cargo\s+(add|remove)|go\s+get)\b/i,
-    reason: "It changes project dependencies.",
-  },
-  {
-    pattern: /\b(curl|wget)\b/i,
-    reason: "It pulls external content into the sandbox.",
-  },
-];
-
-const accentPalette = [
-  "#10b981",
-  "#38bdf8",
-  "#f59e0b",
-  "#fb7185",
-  "#818cf8",
-  "#14b8a6",
-];
-
-const statusMeta: Record<
-  AgentStatus,
-  {
-    label: string;
-    dotClass: string;
-    badgeVariant: "emerald" | "amber" | "danger" | "muted";
-  }
-> = {
-  active: { label: "Active", dotClass: "bg-primary", badgeVariant: "emerald" },
-  idle: { label: "Idle", dotClass: "bg-amber-400", badgeVariant: "amber" },
-  error: { label: "Error", dotClass: "bg-danger", badgeVariant: "danger" },
-  offline: {
-    label: "Offline",
-    dotClass: "bg-slate-500",
-    badgeVariant: "muted",
-  },
-};
-
-const runStatusMeta: Record<
-  string,
-  {
-    label: string;
-    badgeVariant: "emerald" | "amber" | "danger" | "muted" | "cyan";
-  }
-> = {
-  queued: { label: "Queued", badgeVariant: "cyan" },
-  planning: { label: "Planning", badgeVariant: "amber" },
-  running: { label: "Running", badgeVariant: "amber" },
-  waiting_for_approval: { label: "Awaiting Approval", badgeVariant: "amber" },
-  blocked: { label: "Blocked", badgeVariant: "danger" },
-  completed: { label: "Completed", badgeVariant: "emerald" },
-  failed: { label: "Failed", badgeVariant: "danger" },
-  canceled: { label: "Canceled", badgeVariant: "muted" },
-};
-
-const delegationMeta: Record<
+// ── Extracted modules ────────────────────────────────────────────────
+import type {
+  AgentSource,
+  SandboxMode,
+  WorkspaceView,
   DelegationStatus,
-  { label: string; badgeVariant: "cyan" | "emerald" | "amber" | "muted" }
-> = {
-  queued: { label: "Queued", badgeVariant: "cyan" },
-  active: { label: "Active", badgeVariant: "emerald" },
-  blocked: { label: "Blocked", badgeVariant: "amber" },
-  done: { label: "Done", badgeVariant: "muted" },
-};
-
-const channelMeta: Record<
-  ChannelStatus,
-  { label: string; badgeVariant: "emerald" | "amber" | "muted" }
-> = {
-  active: { label: "Active", badgeVariant: "emerald" },
-  blocked: { label: "Blocked", badgeVariant: "amber" },
-  done: { label: "Done", badgeVariant: "muted" },
-};
-
-const priorityMeta: Record<
   DelegationPriority,
-  { label: string; badgeVariant: "muted" | "cyan" | "danger" }
-> = {
-  low: { label: "Low", badgeVariant: "muted" },
-  medium: { label: "Medium", badgeVariant: "cyan" },
-  high: { label: "High", badgeVariant: "danger" },
-};
-
-const executionModeMeta: Record<
   DelegationExecutionMode,
-  { label: string; badgeVariant: "muted" | "cyan" | "amber" }
-> = {
-  manual: { label: "Manual", badgeVariant: "muted" },
-  thread: { label: "Thread", badgeVariant: "cyan" },
-  command: { label: "Command", badgeVariant: "amber" },
+  CommandExecutionSource,
+  PermissionKey,
+  AgentAutomationKey,
+  AgentConnectorKey,
+  ActivityKind,
+  ChannelStatus,
+  ChannelMessageKind,
+  PresenceTone,
+  AgentPermissions,
+  WorkspaceAgent,
+  DelegationTask,
+  ChatMessage,
+  CollaborationChannel,
+  ChannelMessage,
+  ComposerAttachment,
+  CommandRun,
+  CommandReview,
+  PendingCommandApproval,
+  ToolApprovalState,
+  AgentExecutionPlan,
+  ExecutionStepResult,
+  BridgeCommandRow,
+  CommandExecutionRequestResult,
+  LiveActivityEntry,
+  AgentDraft,
+  ChannelDraft,
+  DelegationDraft,
+  GithubDeviceAuthSession,
+  WorkspaceAgentRow,
+  WorkspaceDelegationRow,
+  WorkspaceMessageRow,
+  WorkspaceCommandRunRow,
+  WorkspaceDispatcherDecisionRow,
+  WorkspaceContextPackageRow,
+  WorkspaceTaskTreeRow,
+  WorkspaceVerifierReviewRow,
+  WorkspacePlanReviewRow,
+  WorkspaceCircuitBreakerEventRow,
+  WorkspaceKnowledgeGraphRow,
+  WorkspaceToolDraftRow,
+} from "@/types";
+export type {
+  AgentSource, SandboxMode, WorkspaceView, DelegationStatus, DelegationPriority,
+  DelegationExecutionMode, CommandExecutionSource, PermissionKey,
+  AgentAutomationKey, AgentConnectorKey, ActivityKind, ChannelStatus,
+  ChannelMessageKind, PresenceTone, AgentPermissions, WorkspaceAgent,
+  DelegationTask, ChatMessage, CollaborationChannel, ChannelMessage,
+  ComposerAttachment, CommandRun, CommandReview, PendingCommandApproval,
+  ToolApprovalState, AgentExecutionPlan, ExecutionStepResult, BridgeCommandRow,
+  CommandExecutionRequestResult, LiveActivityEntry, AgentDraft, ChannelDraft,
+  DelegationDraft, GithubDeviceAuthSession,
 };
-
-const viewItems: Array<{
-  id: WorkspaceView;
-  label: string;
-  icon: typeof MessageCircle;
-}> = [
-  { id: "chat", label: "Threads", icon: MessageCircle },
-  { id: "channels", label: "Channels", icon: Users2 },
-  { id: "council", label: "Council", icon: Bot },
-  { id: "delegations", label: "Delegations", icon: Workflow },
-  { id: "activity", label: "Activity", icon: Activity },
-  { id: "accounts", label: "Accounts", icon: Key },
-  { id: "observability", label: "Observe", icon: Clock3 },
-];
-
-const DEFAULT_AGENT_WORKSPACE = "/Users/vanshsehrawat";
-const CLOUD_BRIDGE_AGENT_ID =
-  import.meta.env.VITE_CLOUD_BRIDGE_AGENT_ID?.trim() || "alpha";
-const CLOUD_BRIDGE_INGEST_SECRET =
-  import.meta.env.VITE_CLOUD_BRIDGE_INGEST_SECRET?.trim() || "";
-const CLOUD_BRIDGE_SECRET_STORAGE_KEY = "clawbuddy-ingest-secret";
-const isLocalBrowserOrigin = () => {
-  if (typeof window === "undefined") {
-    return false;
-  }
-
-  return ["localhost", "127.0.0.1", "::1"].includes(window.location.hostname);
-};
-const CONTROL_ROOM_ROOT = "/Users/vanshsehrawat/Desktop/control room";
-const PDF_RESUME_GENERATOR_PATH = `${CONTROL_ROOM_ROOT}/scripts/generate_resume_pdf.py`;
-const LEGACY_DEFAULT_WORKSPACES = new Set([
-  "/workspace/control-room",
-  "/Users/vanshsehrawat/Desktop/control room",
-]);
-
-function resolveWorkspacePath(
-  workspace: string | null | undefined,
-  fallback = DEFAULT_AGENT_WORKSPACE,
-) {
-  const trimmed = (workspace ?? "").trim();
-  return !trimmed || LEGACY_DEFAULT_WORKSPACES.has(trimmed)
-    ? fallback
-    : trimmed;
-}
-
-function shellQuote(value: string) {
-  return `'${value.replace(/'/g, `'\\''`)}'`;
-}
-
-function encodePromptForShell(prompt: string) {
-  if (typeof window === "undefined") {
-    return "";
-  }
-
-  return window.btoa(unescape(encodeURIComponent(prompt)));
-}
-
-function extractResumeName(prompt: string) {
-  const explicitMatch =
-    prompt.match(
-      /\b(?:i am|my name is)\s+([a-z][a-z\s]+?)(?:\s+in\b|\s+from\b|,|\.|$)/i,
-    ) ||
-    prompt.match(
-      /\bname\s*[:\-]\s*([a-z][a-z\s]+?)(?:\s+in\b|\s+from\b|,|\.|$)/i,
-    );
-
-  const candidate = explicitMatch?.[1]?.trim();
-  if (!candidate) {
-    return "Resume";
-  }
-
-  return candidate
-    .split(/\s+/)
-    .filter(Boolean)
-    .map((part) => part.charAt(0).toUpperCase() + part.slice(1).toLowerCase())
-    .join("_");
-}
-
-function shouldUseResumePdfSkill(
-  prompt: string,
-  contextMessages: ChatMessage[] = [],
-) {
-  const recentContext = contextMessages
-    .slice(-8)
-    .map((message) => message.contextText || message.content)
-    .join("\n\n");
-  const normalizedPrompt = prompt.toLowerCase();
-  const normalizedContext = recentContext.toLowerCase();
-  const combined = `${normalizedContext}\n${normalizedPrompt}`;
-  const promptMentionsPdf = /\b(pdf|resume pdf|cv pdf)\b/.test(
-    normalizedPrompt,
-  );
-  const combinedMentionsPdf = /\b(pdf|resume pdf|cv pdf)\b/.test(combined);
-  const combinedMentionsResume = /\b(resume|cv)\b/.test(combined);
-  const promptWantsCreation =
-    /\b(create|generate|make|build|save|export)\b/.test(normalizedPrompt);
-  const followUpCreate =
-    /\b(run it|do it yourself|create it|make it|save it|generate it|export it)\b/.test(
-      normalizedPrompt,
-    );
-
-  return (
-    (promptMentionsPdf && promptWantsCreation) ||
-    (combinedMentionsPdf &&
-      combinedMentionsResume &&
-      (promptWantsCreation || followUpCreate)) ||
-    (combinedMentionsResume &&
-      promptWantsCreation &&
-      normalizedPrompt.includes("pdf"))
-  );
-}
-
-function buildResumePdfSkillPlan(
-  prompt: string,
-  contextMessages: ChatMessage[],
-): AgentExecutionPlan {
-  const combinedPrompt = contextMessages
-    .map((message) => message.contextText || message.content)
-    .concat(prompt)
-    .filter(Boolean)
-    .join("\n\n");
-  const outputName = `${extractResumeName(combinedPrompt)}_Resume.pdf`;
-  const outputPath = `${DEFAULT_AGENT_WORKSPACE}/Desktop/${outputName}`;
-  const encodedPrompt = encodePromptForShell(combinedPrompt);
-  const command = [
-    "python3",
-    shellQuote(PDF_RESUME_GENERATOR_PATH),
-    "--output",
-    shellQuote(outputPath),
-    "--prompt-b64",
-    shellQuote(encodedPrompt),
-  ].join(" ");
-
-  return {
-    mode: "command",
-    command,
-    cwd: DEFAULT_AGENT_WORKSPACE,
-    reasoning:
-      "Using the bundled PDF generation skill to create the requested resume PDF on Desktop.",
-  };
-}
-
-const builtInSkillCatalog: Array<{
-  id: string;
-  label: string;
-  icon: typeof FileText;
-  description: string;
-  keywords: string[];
-  requiredPermissions: PermissionKey[];
-}> = [
-  {
-    id: "pdf",
-    label: "PDF generate & review",
-    icon: FileText,
-    description:
-      "Create polished PDFs, inspect existing files, extract content, and review layout-sensitive documents.",
-    keywords: ["pdf", "report", "deck", "export", "document"],
-    requiredPermissions: ["files"],
-  },
-  {
-    id: "docx",
-    label: "DOCX editing",
-    icon: ScrollText,
-    description:
-      "Draft and update Word documents while preserving headings, formatting, and structure.",
-    keywords: ["doc", "docx", "word", "proposal", "brief"],
-    requiredPermissions: ["files"],
-  },
-  {
-    id: "spreadsheet",
-    label: "Spreadsheet analysis",
-    icon: FolderOpen,
-    description:
-      "Create and analyze CSV/XLSX data, formulas, and tabular reports for operations and finance work.",
-    keywords: ["sheet", "spreadsheet", "excel", "csv", "xlsx", "table"],
-    requiredPermissions: ["files"],
-  },
-  {
-    id: "browser-qa",
-    label: "Browser automation",
-    icon: Globe,
-    description:
-      "Run browser-driven QA, UI walkthroughs, screenshots, and page-level workflow checks.",
-    keywords: ["playwright", "browser", "qa", "e2e", "ui", "automation"],
-    requiredPermissions: ["browser"],
-  },
-  {
-    id: "github",
-    label: "GitHub workflows",
-    icon: Github,
-    description:
-      "Inspect repositories, triage PRs, review comments, and manage code-centric collaboration loops.",
-    keywords: ["github", "pr", "review", "issue", "ci", "repo"],
-    requiredPermissions: ["git"],
-  },
-  {
-    id: "docs-research",
-    label: "Docs & web research",
-    icon: Globe,
-    description:
-      "Pull official docs, compare sources, summarize references, and gather current external context.",
-    keywords: ["docs", "research", "web", "search", "reference", "compare"],
-    requiredPermissions: ["browser"],
-  },
-  {
-    id: "deploy",
-    label: "Deployments",
-    icon: Workflow,
-    description:
-      "Ship previews, run deployment flows, and support environment-aware release tasks from the workspace.",
-    keywords: ["deploy", "vercel", "release", "preview", "ship"],
-    requiredPermissions: ["terminal", "files"],
-  },
-];
-
-const providerPresets = [
-  { label: "OpenAI", provider: "OpenAI", model: "gpt-4.1" },
-  { label: "Anthropic", provider: "Anthropic", model: "claude-3-7-sonnet" },
-  {
-    label: "Gemini",
-    provider: "Gemini",
-    model: "gemini-2.5-flash",
-    displayModel: "Gemini 2.5 Flash",
-  },
-  {
-    label: "Gemini",
-    provider: "Gemini",
-    model: "gemini-2.5-pro",
-    displayModel: "Gemini 2.5 Pro",
-  },
-  {
-    label: "Gemini",
-    provider: "Gemini",
-    model: "gemini-3-flash-preview",
-    displayModel: "Gemini 3 Flash Preview",
-  },
-  {
-    label: "Gemini",
-    provider: "Gemini",
-    model: "gemini-3.1-pro-preview",
-    displayModel: "Gemini 3.1 Pro Preview",
-  },
-  { label: "Groq", provider: "Groq", model: "llama-3.3-70b-versatile" },
-  {
-    label: "OpenRouter",
-    provider: "OpenRouter",
-    model: "google/gemini-2.5-pro",
-  },
-  { label: "GitHub Models", provider: "GitHub", model: "openai/gpt-4.1" },
-  {
-    label: "Copilot · OpenAI",
-    provider: "Copilot",
-    model: "gpt-4.1",
-    displayModel: "GPT-4.1",
-  },
-  {
-    label: "Copilot · OpenAI",
-    provider: "Copilot",
-    model: "gpt-5-mini",
-    displayModel: "GPT-5 mini",
-  },
-  {
-    label: "Copilot · OpenAI",
-    provider: "Copilot",
-    model: "gpt-5.1",
-    displayModel: "GPT-5.1",
-  },
-  {
-    label: "Copilot · OpenAI",
-    provider: "Copilot",
-    model: "gpt-5.2",
-    displayModel: "GPT-5.2",
-  },
-  {
-    label: "Copilot · OpenAI",
-    provider: "Copilot",
-    model: "gpt-5.2-codex",
-    displayModel: "GPT-5.2-Codex",
-  },
-  {
-    label: "Copilot · OpenAI",
-    provider: "Copilot",
-    model: "gpt-5.3-codex",
-    displayModel: "GPT-5.3-Codex",
-  },
-  {
-    label: "Copilot · OpenAI",
-    provider: "Copilot",
-    model: "gpt-5.4",
-    displayModel: "GPT-5.4",
-  },
-  {
-    label: "Copilot · OpenAI",
-    provider: "Copilot",
-    model: "gpt-5.4-mini",
-    displayModel: "GPT-5.4 mini",
-  },
-  {
-    label: "Copilot · Anthropic",
-    provider: "Copilot",
-    model: "claude-haiku-4.5",
-    displayModel: "Claude Haiku 4.5",
-  },
-  {
-    label: "Copilot · Anthropic",
-    provider: "Copilot",
-    model: "claude-opus-4.5",
-    displayModel: "Claude Opus 4.5",
-  },
-  {
-    label: "Copilot · Anthropic",
-    provider: "Copilot",
-    model: "claude-opus-4.6",
-    displayModel: "Claude Opus 4.6",
-  },
-  {
-    label: "Copilot · Anthropic",
-    provider: "Copilot",
-    model: "claude-opus-4.6-fast-mode-preview",
-    displayModel: "Claude Opus 4.6 (fast mode) (preview)",
-  },
-  {
-    label: "Copilot · Anthropic",
-    provider: "Copilot",
-    model: "claude-sonnet-4",
-    displayModel: "Claude Sonnet 4",
-  },
-  {
-    label: "Copilot · Anthropic",
-    provider: "Copilot",
-    model: "claude-sonnet-4.5",
-    displayModel: "Claude Sonnet 4.5",
-  },
-  {
-    label: "Copilot · Anthropic",
-    provider: "Copilot",
-    model: "claude-sonnet-4.6",
-    displayModel: "Claude Sonnet 4.6",
-  },
-  {
-    label: "Copilot · Google",
-    provider: "Copilot",
-    model: "gemini-2.5-pro",
-    displayModel: "Gemini 2.5 Pro",
-  },
-  {
-    label: "Copilot · Google",
-    provider: "Copilot",
-    model: "gemini-3-flash",
-    displayModel: "Gemini 3 Flash",
-  },
-  {
-    label: "Copilot · Google",
-    provider: "Copilot",
-    model: "gemini-3.1-pro",
-    displayModel: "Gemini 3.1 Pro",
-  },
-  {
-    label: "Copilot · xAI",
-    provider: "Copilot",
-    model: "grok-code-fast-1",
-    displayModel: "Grok Code Fast 1",
-  },
-  {
-    label: "Copilot · Tuned",
-    provider: "Copilot",
-    model: "raptor-mini",
-    displayModel: "Raptor mini",
-  },
-  {
-    label: "Copilot · Tuned",
-    provider: "Copilot",
-    model: "goldeneye",
-    displayModel: "Goldeneye",
-  },
-] as const;
-
-const emptyAgentDraft: AgentDraft = {
-  name: "",
-  role: "",
-  emoji: "🤖",
-  provider: "OpenAI",
-  model: "gpt-4.1",
-  objective: "",
-  systemPrompt: "",
-  specialties: "",
-  skills: "",
-  workspace: DEFAULT_AGENT_WORKSPACE,
-  sandboxMode: "workspace-write",
-  terminal: true,
-  browser: true,
-  files: true,
-  git: false,
-  delegation: true,
-};
-
-const GALAXY_AGENT_ID = "galaxy";
-const DEFAULT_CHANNEL_LEAD_AGENT_ID = GALAXY_AGENT_ID;
-const BUILDER_AGENT_ID = "builder";
-
-const codexStyleBuilderDefaults = {
-  subtitle:
-    "Acts like a hands-on coding agent with terminal-first execution and concise follow-through.",
-  role: "Codex-Style Builder",
-  provider: "Copilot",
-  model: "gpt-5.3-codex",
-  objective:
-    "Own implementation work end to end: inspect the workspace, run commands, edit files, install dependencies when needed, and report results with the same practical tone as a strong coding agent.",
-  systemPrompt: [
-    "You are Builder, the hands-on coding agent for this workspace.",
-    "Work like a senior terminal-first software engineer: inspect the codebase, run commands, edit files, verify results, and keep moving until the task is actually handled.",
-    "Default to doing the work yourself instead of only describing it. If a command or code change is the right next step, take it.",
-    "Use the assigned workspace directly, prefer fast CLI inspection, and make concrete progress without waiting for unnecessary confirmation.",
-    "Ask follow-up questions only when a missing detail creates real risk. Otherwise make a reasonable assumption, continue, and say what you assumed.",
-    "When a dependency or tool is needed to complete the job, install or set it up inside the workspace flow instead of stopping to ask first, unless the action is clearly unsafe.",
-    "After terminal work, answer crisply: say what you ran, what changed, what the result was, and any remaining risk.",
-    "Stay warm, collaborative, and practical. Be concise, grounded in real execution, and avoid generic assistant filler.",
-    "Do not delegate unless the user explicitly asks for multi-agent help.",
-  ].join("\n\n"),
-  skills: [
-    "Coding",
-    "Terminal execution",
-    "Dependency setup",
-    "Debugging",
-    "PDF generation & review",
-  ],
-  specialties: [
-    "Implementation",
-    "Debugging",
-    "Terminal execution",
-    "Environment setup",
-  ],
-  tools: ["Terminal", "Files", "Git", "Browser"],
-  sandboxMode: "workspace-write" as SandboxMode,
-  permissions: {
-    terminal: true,
-    browser: true,
-    files: true,
-    git: true,
-    delegation: false,
-  },
-} as const;
-
-const defaultCustomAgents: WorkspaceAgent[] = [
-  {
-    id: GALAXY_AGENT_ID,
-    name: "Galaxy",
-    emoji: "🌌",
-    subtitle:
-      "Your personal command agent for channels, delegation, and follow-through.",
-    type: "Custom Agent",
-    role: "Personal Orchestrator",
-    accent: "#60a5fa",
-    status: "active",
-    currentActivity:
-      "Watching for work that needs a shared room or a specialist handoff",
-    lastSeen: "2026-04-15T08:30:00.000Z",
-    tasksCompleted: 58,
-    accuracy: 96.9,
-    skills: [
-      "Channel orchestration",
-      "Delegation",
-      "Review loops",
-      "PDF generation & review",
-    ],
-    source: "custom",
-    provider: "Copilot",
-    model: "gpt-5.2",
-    objective:
-      "Act as the default personal agent, decide when a new channel is needed, assign the right specialists, and review the room before reporting back.",
-    systemPrompt:
-      "You are Galaxy, the default personal orchestrator for this workspace. Stay in the main DM unless a task clearly needs collaboration, then open a focused channel, dispatch the right specialists, review their outputs, and report back crisply.",
-    specialties: ["Orchestration", "Task routing", "Cross-agent review"],
-    tools: ["Delegation", "Browser", "Files", "Git", "Terminal"],
-    workspace: DEFAULT_AGENT_WORKSPACE,
-    sandboxMode: "workspace-write",
-    permissions: {
-      terminal: true,
-      browser: true,
-      files: true,
-      git: true,
-      delegation: true,
-    },
-  },
-  {
-    id: "architect",
-    name: "Architect",
-    emoji: "🧠",
-    subtitle: "Turns rough ideas into sharp system plans.",
-    type: "Custom Agent",
-    role: "Product + Systems Lead",
-    accent: "#10b981",
-    status: "active",
-    currentActivity: "Mapping the new multi-agent workspace architecture",
-    lastSeen: "2026-04-14T12:12:00.000Z",
-    tasksCompleted: 41,
-    accuracy: 97.2,
-    skills: ["Roadmapping", "Systems design", "Prompt strategy"],
-    source: "custom",
-    provider: "OpenAI",
-    model: "gpt-4.1",
-    objective:
-      "Own product direction, break work into slices, and decide which specialist should handle each job.",
-    systemPrompt:
-      "You are the strategic lead of a personal agent workspace. Clarify goals, reduce ambiguity, and hand off concrete tasks to the right specialist.",
-    specialties: ["Product thinking", "Architecture", "Delegation"],
-    tools: ["Planning", "Delegation", "Workspace context"],
-    workspace: DEFAULT_AGENT_WORKSPACE,
-    sandboxMode: "workspace-write",
-    permissions: {
-      terminal: true,
-      browser: true,
-      files: true,
-      git: true,
-      delegation: true,
-    },
-  },
-  {
-    id: BUILDER_AGENT_ID,
-    name: "Builder",
-    emoji: "🛠️",
-    subtitle: codexStyleBuilderDefaults.subtitle,
-    type: "Custom Agent",
-    role: codexStyleBuilderDefaults.role,
-    accent: "#38bdf8",
-    status: "idle",
-    currentActivity:
-      "Ready to inspect the workspace, run commands, and ship the next coding task",
-    lastSeen: "2026-04-14T12:05:00.000Z",
-    tasksCompleted: 33,
-    accuracy: 95.8,
-    skills: [...codexStyleBuilderDefaults.skills],
-    source: "custom",
-    provider: codexStyleBuilderDefaults.provider,
-    model: codexStyleBuilderDefaults.model,
-    objective: codexStyleBuilderDefaults.objective,
-    systemPrompt: codexStyleBuilderDefaults.systemPrompt,
-    specialties: [...codexStyleBuilderDefaults.specialties],
-    tools: [...codexStyleBuilderDefaults.tools],
-    workspace: DEFAULT_AGENT_WORKSPACE,
-    sandboxMode: codexStyleBuilderDefaults.sandboxMode,
-    permissions: { ...codexStyleBuilderDefaults.permissions },
-  },
-  {
-    id: "researcher",
-    name: "Researcher",
-    emoji: "🔎",
-    subtitle: "Finds context, comparisons, and outside signal.",
-    type: "Custom Agent",
-    role: "Research Analyst",
-    accent: "#f59e0b",
-    status: "idle",
-    currentActivity: "Monitoring product inspiration and best practices",
-    lastSeen: "2026-04-14T11:58:00.000Z",
-    tasksCompleted: 26,
-    accuracy: 94.9,
-    skills: ["Comparative analysis", "Docs digestion", "Brief writing"],
-    source: "custom",
-    provider: "Gemini",
-    model: "gemini-2.5-pro",
-    objective:
-      "Pull in external context, summarize alternatives, and feed decision-ready notes back to the workspace.",
-    systemPrompt:
-      "You are a careful research specialist. Bring in relevant context, compare options clearly, and avoid overclaiming certainty.",
-    specialties: ["Competitive analysis", "Documentation", "Synthesis"],
-    tools: ["Web", "Planning"],
-    workspace: DEFAULT_AGENT_WORKSPACE,
-    sandboxMode: "read-only",
-    permissions: {
-      terminal: false,
-      browser: true,
-      files: false,
-      git: false,
-      delegation: true,
-    },
-  },
-  {
-    id: "sprinter",
-    name: "Sprinter",
-    emoji: "⚡",
-    subtitle: "Handles fast-turn triage and concise ops help.",
-    type: "Custom Agent",
-    role: "Realtime Ops Specialist",
-    accent: "#14b8a6",
-    status: "idle",
-    currentActivity: "Waiting for fast-response tasks",
-    lastSeen: "2026-04-14T10:12:00.000Z",
-    tasksCompleted: 21,
-    accuracy: 93.8,
-    skills: ["Triage", "Concise summaries", "Ops checklists"],
-    source: "custom",
-    provider: "Groq",
-    model: "llama-3.3-70b-versatile",
-    objective:
-      "Move quickly on operational questions, short summaries, and fast first-pass drafts.",
-    systemPrompt:
-      "You are a rapid-response specialist. Keep answers crisp, practical, and immediately useful.",
-    specialties: ["Speed", "Operations", "Triage"],
-    tools: ["Delegation", "Workspace context"],
-    workspace: DEFAULT_AGENT_WORKSPACE,
-    sandboxMode: "read-only",
-    permissions: {
-      terminal: false,
-      browser: false,
-      files: false,
-      git: false,
-      delegation: true,
-    },
-  },
-  {
-    id: "qa-guard",
-    name: "QA Guard",
-    emoji: "🛡️",
-    subtitle: "Keeps regressions and unsafe changes from slipping through.",
-    type: "Custom Agent",
-    role: "Quality Reviewer",
-    accent: "#fb7185",
-    status: "offline",
-    currentActivity: "Ready to review before shipping",
-    lastSeen: "2026-04-14T10:34:00.000Z",
-    tasksCompleted: 17,
-    accuracy: 98.1,
-    skills: ["Code review", "Edge cases", "Release checks"],
-    source: "custom",
-    provider: "OpenAI",
-    model: "gpt-4.1-mini",
-    objective:
-      "Review risky changes, find regressions early, and protect the quality bar before release.",
-    systemPrompt:
-      "You are a quality gate. Prioritize correctness, risks, missing tests, and dangerous assumptions over compliments.",
-    specialties: ["Regression review", "Testing gaps", "Risk analysis"],
-    tools: ["Files", "Diff review"],
-    workspace: DEFAULT_AGENT_WORKSPACE,
-    sandboxMode: "read-only",
-    permissions: {
-      terminal: false,
-      browser: false,
-      files: true,
-      git: true,
-      delegation: false,
-    },
-  },
-];
-
-function mergeDefaultCustomAgents(agents: WorkspaceAgent[]) {
-  const settleStartupAgent = (agent: WorkspaceAgent): WorkspaceAgent =>
-    agent.status === "active"
-      ? {
-          ...agent,
-          status: "idle",
-          currentActivity: "Ready in the thread workspace",
-        }
-      : agent;
-  const storedById = new Map(agents.map((agent) => [agent.id, agent]));
-  const builtIns = defaultCustomAgents.map((defaultAgent) => {
-    const existing = storedById.get(defaultAgent.id);
-    const shouldRestorePreviousRoute =
-      existing !== undefined &&
-      existing.provider === "GitHub" &&
-      existing.model === "openai/gpt-4.1" &&
-      defaultAgent.provider !== "GitHub";
-
-    if (!existing) {
-      return defaultAgent;
-    }
-
-    const permissions = {
-      ...defaultAgent.permissions,
-      ...existing.permissions,
-    };
-
-    const mergedAgent = {
-      ...defaultAgent,
-      ...existing,
-      workspace: resolveWorkspacePath(
-        existing.workspace,
-        defaultAgent.workspace,
-      ),
-      permissions,
-      tools:
-        existing.tools && existing.tools.length > 0
-          ? uniqueStrings([...defaultAgent.tools, ...existing.tools])
-          : deriveTools(permissions),
-      specialties:
-        existing.specialties && existing.specialties.length > 0
-          ? uniqueStrings([
-              ...defaultAgent.specialties,
-              ...existing.specialties,
-            ])
-          : defaultAgent.specialties,
-      skills:
-        existing.skills && existing.skills.length > 0
-          ? uniqueStrings([...defaultAgent.skills, ...existing.skills])
-          : defaultAgent.skills,
-    };
-
-    if (shouldRestorePreviousRoute) {
-      mergedAgent.provider = defaultAgent.provider;
-      mergedAgent.model = defaultAgent.model;
-    }
-
-    if (defaultAgent.id !== BUILDER_AGENT_ID) {
-      return settleStartupAgent(mergedAgent);
-    }
-
-    return settleStartupAgent({
-      ...mergedAgent,
-      subtitle: codexStyleBuilderDefaults.subtitle,
-      role: codexStyleBuilderDefaults.role,
-      provider: shouldRestorePreviousRoute
-        ? codexStyleBuilderDefaults.provider
-        : existing?.provider?.trim() || codexStyleBuilderDefaults.provider,
-      model: shouldRestorePreviousRoute
-        ? codexStyleBuilderDefaults.model
-        : existing?.model?.trim() || codexStyleBuilderDefaults.model,
-      objective: codexStyleBuilderDefaults.objective,
-      systemPrompt: codexStyleBuilderDefaults.systemPrompt,
-      specialties: uniqueStrings([
-        ...codexStyleBuilderDefaults.specialties,
-        ...(existing?.specialties ?? []),
-      ]),
-      skills: uniqueStrings([
-        ...codexStyleBuilderDefaults.skills,
-        ...(existing?.skills ?? []),
-      ]),
-      tools: uniqueStrings([
-        ...codexStyleBuilderDefaults.tools,
-        ...(existing?.tools ?? []),
-      ]),
-      sandboxMode: codexStyleBuilderDefaults.sandboxMode,
-      permissions: {
-        ...permissions,
-        ...codexStyleBuilderDefaults.permissions,
-      },
-    });
-  });
-
-  const extras = agents
-    .filter(
-      (agent) =>
-        !defaultCustomAgents.some(
-          (defaultAgent) => defaultAgent.id === agent.id,
-        ),
-    )
-    .map((agent) => ({
-      ...settleStartupAgent(agent),
-      workspace: resolveWorkspacePath(agent.workspace),
-    }));
-  return [...builtIns, ...extras];
-}
-
-const defaultDelegations: DelegationTask[] = [
-  {
-    id: "task-shell-redesign",
-    title: "Reshape the dashboard into an agent-first workspace",
-    fromAgentId: "architect",
-    assigneeId: "builder",
-    status: "active",
-    priority: "high",
-    notes:
-      "Focus on sidebar agents, thread workspace, and a right-side config panel.",
-    executionMode: "thread",
-    payload:
-      "Take ownership of the workspace redesign. Focus on sidebar agents, thread workspace, and a right-side config panel. Keep the implementation shippable in small steps.",
-    cwd: DEFAULT_AGENT_WORKSPACE,
-    updatedAt: "2026-04-14T12:18:00.000Z",
-  },
-  {
-    id: "task-nebula-study",
-    title: "Study Nebula-style flows and extract the useful patterns",
-    fromAgentId: "architect",
-    assigneeId: "researcher",
-    status: "queued",
-    priority: "medium",
-    notes: "Focus on custom agents, roles, delegation, and device access.",
-    executionMode: "thread",
-    payload:
-      "Study Nebula-style flows and summarize the strongest product patterns around custom agents, roles, delegation, and device access.",
-    cwd: DEFAULT_AGENT_WORKSPACE,
-    updatedAt: "2026-04-14T12:09:00.000Z",
-  },
-  {
-    id: "task-release-check",
-    title: "Review the first build for risky assumptions before runtime wiring",
-    fromAgentId: "builder",
-    assigneeId: "qa-guard",
-    status: "blocked",
-    priority: "medium",
-    notes: "Wait until the first agent workspace shell is compiling again.",
-    executionMode: "manual",
-    payload: "",
-    cwd: DEFAULT_AGENT_WORKSPACE,
-    updatedAt: "2026-04-14T11:41:00.000Z",
-  },
-];
-
-const defaultChannels: CollaborationChannel[] = [
-  {
-    id: "channel-fresh-chat",
-    title: "New Channel",
-    objective: "",
-    leadAgentId: DEFAULT_CHANNEL_LEAD_AGENT_ID,
-    memberAgentIds: [DEFAULT_CHANNEL_LEAD_AGENT_ID],
-    memberTargets: {
-      [DEFAULT_CHANNEL_LEAD_AGENT_ID]: "",
-    },
-    status: "active",
-    linkedDelegationIds: [],
-    lastSummary: "",
-    updatedAt: "2026-04-15T00:00:00.000Z",
-  },
-];
-
-const emptyChannelDraft: ChannelDraft = {
-  title: "",
-  objective: "",
-  leadAgentId: DEFAULT_CHANNEL_LEAD_AGENT_ID,
-  memberAgentIds: [
-    DEFAULT_CHANNEL_LEAD_AGENT_ID,
-    "architect",
-    "builder",
-    "researcher",
-  ],
-  memberTargets: {},
-};
-
-function normalizeChannelTargets(value: unknown, memberAgentIds: string[]) {
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    return Object.fromEntries(
-      memberAgentIds.map((agentId) => [agentId, ""]),
-    ) as Record<string, string>;
-  }
-
-  const source = value as Record<string, unknown>;
-  return Object.fromEntries(
-    memberAgentIds.map((agentId) => [
-      agentId,
-      typeof source[agentId] === "string" ? source[agentId] : "",
-    ]),
-  ) as Record<string, string>;
-}
-
-function normalizeChannel(
-  channel: Partial<CollaborationChannel>,
-): CollaborationChannel {
-  const memberAgentIds = uniqueStrings(
-    asStringArray(channel.memberAgentIds ?? [DEFAULT_CHANNEL_LEAD_AGENT_ID]),
-  );
-  return {
-    id: channel.id ?? `channel-${Date.now().toString(36)}`,
-    title: channel.title ?? "Untitled Channel",
-    objective: channel.objective ?? "",
-    leadAgentId: channel.leadAgentId ?? DEFAULT_CHANNEL_LEAD_AGENT_ID,
-    memberAgentIds,
-    memberTargets: normalizeChannelTargets(
-      (channel as { memberTargets?: unknown }).memberTargets,
-      memberAgentIds,
-    ),
-    status:
-      channel.status === "blocked" ||
-      channel.status === "done" ||
-      channel.status === "active"
-        ? channel.status
-        : "active",
-    linkedDelegationIds: uniqueStrings(
-      asStringArray(channel.linkedDelegationIds ?? []),
-    ),
-    lastSummary: channel.lastSummary ?? "",
-    updatedAt: channel.updatedAt ?? new Date().toISOString(),
-  };
-}
-
-function normalizeChannelMessage(
-  message: Partial<ChannelMessage>,
-  fallbackChannelId: string,
-): ChannelMessage {
-  return {
-    id: message.id ?? `${fallbackChannelId}-message-${Date.now().toString(36)}`,
-    channelId: message.channelId ?? fallbackChannelId,
-    sender: message.sender ?? "Workspace",
-    senderId: typeof message.senderId === "string" ? message.senderId : null,
-    role:
-      message.role === "user" ||
-      message.role === "agent" ||
-      message.role === "system"
-        ? message.role
-        : "system",
-    kind:
-      message.kind === "task" ||
-      message.kind === "handoff" ||
-      message.kind === "result" ||
-      message.kind === "system" ||
-      message.kind === "message"
-        ? message.kind
-        : "message",
-    content: message.content ?? "",
-    timestamp: message.timestamp ?? new Date().toISOString(),
-  };
-}
-
-function normalizeDelegationTask(
-  task: Partial<DelegationTask>,
-): DelegationTask {
-  return {
-    id: task.id ?? `delegation-${Date.now().toString(36)}`,
-    title: task.title ?? "Untitled delegation",
-    fromAgentId: task.fromAgentId ?? "architect",
-    assigneeId: task.assigneeId ?? "builder",
-    status: task.status ?? "queued",
-    priority: task.priority ?? "medium",
-    notes: task.notes ?? "",
-    executionMode: task.executionMode ?? "manual",
-    payload: task.payload ?? "",
-    cwd: resolveWorkspacePath(task.cwd),
-    channelId: task.channelId ?? null,
-    updatedAt: task.updatedAt ?? new Date().toISOString(),
-  };
-}
-
-function asStringArray(value: unknown): string[] {
-  return Array.isArray(value)
-    ? value.filter((entry): entry is string => typeof entry === "string")
-    : [];
-}
-
-function asAgentPermissions(value: unknown): AgentPermissions {
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    return {
-      terminal: false,
-      browser: false,
-      files: false,
-      git: false,
-      delegation: false,
-    };
-  }
-
-  const source = value as Record<string, unknown>;
-
-  return {
-    terminal: Boolean(source.terminal),
-    browser: Boolean(source.browser),
-    files: Boolean(source.files),
-    git: Boolean(source.git),
-    delegation: Boolean(source.delegation),
-  };
-}
-
-function mapWorkspaceAgentRow(row: WorkspaceAgentRow): WorkspaceAgent {
-  return {
-    id: row.id,
-    emoji: row.emoji,
-    name: row.name,
-    subtitle: row.subtitle,
-    type: row.type,
-    role: row.role,
-    accent: row.accent,
-    status: row.status as AgentStatus,
-    currentActivity: row.current_activity,
-    lastSeen: row.last_seen,
-    tasksCompleted: row.tasks_completed,
-    accuracy: Number(row.accuracy),
-    skills: asStringArray(row.skills),
-    source: row.source as AgentSource,
-    provider: row.provider,
-    model: row.model,
-    objective: row.objective,
-    systemPrompt: row.system_prompt,
-    specialties: asStringArray(row.specialties),
-    tools: asStringArray(row.tools),
-    workspace: resolveWorkspacePath(row.workspace_path),
-    sandboxMode: row.sandbox_mode as SandboxMode,
-    permissions: asAgentPermissions(row.permissions),
-  };
-}
-
-function mapWorkspaceDelegationRow(
-  row: WorkspaceDelegationRow,
-): DelegationTask {
-  return normalizeDelegationTask({
-    id: row.id,
-    title: row.title,
-    fromAgentId: row.from_agent_id,
-    assigneeId: row.assignee_id,
-    status: row.status as DelegationStatus,
-    priority: row.priority as DelegationPriority,
-    notes: row.notes,
-    executionMode: row.execution_mode as DelegationExecutionMode,
-    payload: row.payload,
-    cwd: row.cwd,
-    updatedAt: row.updated_at,
-  });
-}
-
-function mapWorkspaceCommandRunRow(row: WorkspaceCommandRunRow): CommandRun {
-  const validStatuses = new Set([
-    "queued",
-    "planning",
-    "running",
-    "waiting_for_approval",
-    "blocked",
-    "completed",
-    "failed",
-    "canceled",
-  ]);
-  const status = validStatuses.has(row.status)
-    ? (row.status as CommandRun["status"])
-    : "failed";
-
-  return {
-    id: row.id,
-    agentId: row.agent_id,
-    command: row.command,
-    cwd: row.cwd,
-    status,
-    exitCode: row.exit_code,
-    stdout: row.stdout,
-    stderr: row.stderr,
-    timedOut: row.timed_out,
-    durationMs: row.duration_ms,
-    createdAt: row.created_at,
-    completedAt: null,
-    canceledAt: null,
-    activityKind: "sandbox",
-    activityLabel: "Sandbox Run",
-    phase: (row as Record<string, unknown>).phase as
-      | string
-      | undefined as CommandRun["phase"],
-    retryCount:
-      ((row as Record<string, unknown>).retry_count as number | undefined) ?? 0,
-    maxRetries:
-      ((row as Record<string, unknown>).max_retries as number | undefined) ?? 3,
-    parentRunId:
-      ((row as Record<string, unknown>).parent_run_id as
-        | string
-        | null
-        | undefined) ?? null,
-    retryOfRunId:
-      ((row as Record<string, unknown>).retry_of_run_id as
-        | string
-        | null
-        | undefined) ?? null,
-    model:
-      ((row as Record<string, unknown>).model as string | null | undefined) ??
-      null,
-    provider:
-      ((row as Record<string, unknown>).provider as
-        | string
-        | null
-        | undefined) ?? null,
-  };
-}
-
-function decodePayload<T>(value: Json, fallback: T): T {
-  if (value === null || value === undefined) {
-    return fallback;
-  }
-  return value as unknown as T;
-}
-
-function mapWorkspaceDispatcherDecisionRow(
-  row: WorkspaceDispatcherDecisionRow,
-): DispatcherDecision {
-  return decodePayload(row.payload, {
-    id: row.id,
-    prompt: "",
-    intent: row.intent as DispatcherDecision["intent"],
-    lane: row.lane as DispatcherDecision["lane"],
-    leadAgentId: row.lead_agent_id,
-    collaboratorAgentIds: [],
-    matchedAgentIds: [],
-    reason: "",
-    riskLevel: row.risk_level as DispatcherDecision["riskLevel"],
-    complexityScore: row.complexity_score,
-    requiresPlanReview: row.requires_plan_review,
-    traceSignals: [],
-    createdAt: row.created_at,
-  });
-}
-
-function mapWorkspaceContextPackageRow(
-  row: WorkspaceContextPackageRow,
-): ContextPackage {
-  return decodePayload(row.payload, {
-    id: row.id,
-    agentId: row.agent_id,
-    summary: "",
-    globalContext: [],
-    channelContext: [],
-    agentContext: [],
-    provenance: [],
-    createdAt: row.created_at,
-  });
-}
-
-function mapWorkspaceTaskTreeRow(row: WorkspaceTaskTreeRow): TaskTree {
-  return decodePayload(row.payload, {
-    id: row.id,
-    dispatcherDecisionId: row.dispatcher_decision_id,
-    rootPrompt: "",
-    status: row.status as TaskTree["status"],
-    rootAgentId: row.root_agent_id,
-    nodes: [],
-    createdAt: row.created_at,
-    updatedAt: row.updated_at,
-  });
-}
-
-function mapWorkspaceVerifierReviewRow(
-  row: WorkspaceVerifierReviewRow,
-): VerifierReview {
-  return decodePayload(row.payload, {
-    id: row.id,
-    agentId: row.agent_id,
-    taskTreeId: row.task_tree_id,
-    verdict: row.verdict as VerifierReview["verdict"],
-    feedback: "",
-    attempts: row.attempts,
-    candidatePreview: "",
-    createdAt: row.created_at,
-  });
-}
-
-function mapWorkspacePlanReviewRow(row: WorkspacePlanReviewRow): PlanReviewRequest {
-  return decodePayload(row.payload, {
-    id: row.id,
-    title: "Plan review",
-    objective: "",
-    dispatcherDecisionId: row.dispatcher_decision_id,
-    riskLevel: row.risk_level as PlanReviewRequest["riskLevel"],
-    steps: [],
-    expectedOutcome: "",
-    riskAssessment: [],
-    status: row.status as PlanReviewRequest["status"],
-    createdAt: row.created_at,
-  });
-}
-
-function mapWorkspaceCircuitBreakerEventRow(
-  row: WorkspaceCircuitBreakerEventRow,
-): CircuitBreakerEvent {
-  return decodePayload(row.payload, {
-    id: row.id,
-    agentId: row.agent_id,
-    reason: "",
-    handoffCount: 0,
-    triggeredAt: row.triggered_at,
-    resolution: row.resolution as CircuitBreakerEvent["resolution"],
-  });
-}
-
-function mapWorkspaceKnowledgeGraphRow(
-  row: WorkspaceKnowledgeGraphRow,
-): KnowledgeGraph {
-  return decodePayload(row.payload, {
-    nodes: [],
-    edges: [],
-    generatedAt: row.generated_at,
-  });
-}
-
-function mapWorkspaceToolDraftRow(row: WorkspaceToolDraftRow): ToolDraft {
-  return decodePayload(row.payload, {
-    id: row.id,
-    name: "Generated Tool",
-    description: "",
-    scriptPath: "",
-    language: row.language as ToolDraft["language"],
-    status: row.status as ToolDraft["status"],
-    validationNotes: [],
-    createdAt: row.created_at,
-  });
-}
-
-function mapRuntimeRunRecord(run: RuntimeCommandRunRecord): CommandRun {
-  const validStatuses = new Set([
-    "queued",
-    "planning",
-    "running",
-    "waiting_for_approval",
-    "blocked",
-    "completed",
-    "failed",
-    "canceled",
-  ]);
-  const status = validStatuses.has(run.status) ? run.status : "failed";
-
-  return {
-    id: run.id,
-    agentId: run.agentId,
-    agentName: run.agentName,
-    command: run.command,
-    cwd: run.cwd,
-    status,
-    phase: run.phase,
-    exitCode: typeof run.exitCode === "number" ? run.exitCode : null,
-    stdout: run.stdout || "",
-    stderr: run.stderr || "",
-    timedOut: Boolean(run.timedOut),
-    durationMs: typeof run.durationMs === "number" ? run.durationMs : null,
-    createdAt: run.startedAt,
-    completedAt: run.completedAt || null,
-    canceledAt: run.canceledAt || null,
-    runtimeRunId: run.id,
-    activityKind: toLiveActivityKind(run.activity?.kind),
-    activityLabel: run.activity?.label || "Sandbox Run",
-    activitySummary: run.activity?.summary || "",
-    error: run.error || "",
-    retryCount: run.retryCount ?? 0,
-    maxRetries: run.maxRetries ?? 3,
-    parentRunId: run.parentRunId ?? null,
-    retryOfRunId: run.retryOfRunId ?? null,
-    model: run.model ?? null,
-    provider: run.provider ?? null,
-    artifacts: run.artifacts ?? [],
-  };
-}
-
-function groupWorkspaceMessages(rows: WorkspaceMessageRow[]) {
-  const grouped: Record<string, ChatMessage[]> = {};
-
-  rows.forEach((row) => {
-    if (!grouped[row.agent_id]) {
-      grouped[row.agent_id] = [];
-    }
-
-    const message = {
-      id: row.id,
-      agentId: row.agent_id,
-      role: row.role as ChatMessage["role"],
-      sender: row.sender,
-      content: row.content,
-      timestamp: row.message_timestamp,
-    };
-
-    if (!isCannedAgentSetupMessage(message)) {
-      grouped[row.agent_id].push(message);
-    }
-  });
-
-  return grouped;
-}
-
-function mergeMessagesByAgent(
-  localMessagesByAgent: Record<string, ChatMessage[]>,
-  remoteMessagesByAgent: Record<string, ChatMessage[]>,
-) {
-  const agentIds = new Set([
-    ...Object.keys(localMessagesByAgent),
-    ...Object.keys(remoteMessagesByAgent),
-  ]);
-  const merged: Record<string, ChatMessage[]> = {};
-
-  agentIds.forEach((agentId) => {
-    const byId = new Map<string, ChatMessage>();
-
-    for (const message of localMessagesByAgent[agentId] ?? []) {
-      byId.set(message.id, message);
-    }
-
-    for (const message of remoteMessagesByAgent[agentId] ?? []) {
-      byId.set(message.id, {
-        ...byId.get(message.id),
-        ...message,
-      });
-    }
-
-    merged[agentId] = Array.from(byId.values()).sort(
-      (left, right) =>
-        left.timestamp.localeCompare(right.timestamp) ||
-        left.id.localeCompare(right.id),
-    );
-  });
-
-  return merged;
-}
-
-function isCannedAgentSetupMessage(message: Pick<ChatMessage, "id" | "content" | "role">) {
-  return (
-    (message.role === "system" &&
-      message.content.includes("local prototype mode")) ||
-    message.content.includes("The UI is real, and the agent profile is real") ||
-    message.content.includes("My lane is ") ||
-    message.content.includes("this thread is ready to become a real execution lane next")
-  );
-}
-
-function sanitizeMessagesByAgent(
-  messagesByAgent: Record<string, ChatMessage[]>,
-) {
-  let changed = false;
-  const sanitized = Object.fromEntries(
-    Object.entries(messagesByAgent).map(([agentId, messages]) => {
-      const filtered = messages.filter(
-        (message) => !isCannedAgentSetupMessage(message),
-      );
-      if (filtered.length !== messages.length) {
-        changed = true;
-      }
-      return [agentId, filtered];
-    }),
-  ) as Record<string, ChatMessage[]>;
-
-  return changed ? sanitized : messagesByAgent;
-}
-
-function customAgentsSignature(agents: WorkspaceAgent[]) {
-  return JSON.stringify(agents);
-}
-
-function delegationSignature(tasks: DelegationTask[]) {
-  return JSON.stringify(tasks);
-}
-
-function messageMapSignature(messagesByAgent: Record<string, ChatMessage[]>) {
-  return JSON.stringify(
-    Object.entries(messagesByAgent)
-      .sort(([left], [right]) => left.localeCompare(right))
-      .map(([agentId, messages]) => [
-        agentId,
-        [...messages].sort(
-          (left, right) =>
-            left.timestamp.localeCompare(right.timestamp) ||
-            left.id.localeCompare(right.id),
-        ),
-      ]),
-  );
-}
-
-function commandRunsSignature(runs: CommandRun[]) {
-  return JSON.stringify(runs);
-}
-
-function contextPackagesSignature(contextPackagesByAgent: Record<string, ContextPackage>) {
-  return JSON.stringify(
-    Object.entries(contextPackagesByAgent).sort(([left], [right]) =>
-      left.localeCompare(right),
-    ),
-  );
-}
-
-function taskTreesSignature(taskTrees: TaskTree[]) {
-  return JSON.stringify(taskTrees);
-}
-
-function verifierReviewsSignature(reviews: VerifierReview[]) {
-  return JSON.stringify(reviews);
-}
-
-function dispatcherDecisionsSignature(decisions: DispatcherDecision[]) {
-  return JSON.stringify(decisions);
-}
-
-function planReviewsSignature(reviews: PlanReviewRequest[]) {
-  return JSON.stringify(reviews);
-}
-
-function circuitBreakerEventsSignature(events: CircuitBreakerEvent[]) {
-  return JSON.stringify(events);
-}
-
-function knowledgeGraphsSignature(graphsByAgent: Record<string, KnowledgeGraph>) {
-  return JSON.stringify(
-    Object.entries(graphsByAgent).sort(([left], [right]) =>
-      left.localeCompare(right),
-    ),
-  );
-}
-
-function toolDraftsSignature(drafts: ToolDraft[]) {
-  return JSON.stringify(drafts);
-}
-
-function parseList(value: string) {
-  return value
-    .split(",")
-    .map((entry) => entry.trim())
-    .filter(Boolean);
-}
-
-function uniqueStrings(values: string[]) {
-  return Array.from(new Set(values));
-}
-
-function toLiveActivityKind(kind?: string): ActivityKind {
-  if (
-    kind === "search" ||
-    kind === "read" ||
-    kind === "git" ||
-    kind === "test" ||
-    kind === "build" ||
-    kind === "install" ||
-    kind === "delegation" ||
-    kind === "thinking" ||
-    kind === "typing" ||
-    kind === "code.search" ||
-    kind === "filesystem.read" ||
-    kind === "filesystem.write" ||
-    kind === "filesystem.list" ||
-    kind === "git.status" ||
-    kind === "git.diff" ||
-    kind === "git.log" ||
-    kind === "shell.exec" ||
-    kind === "http.request" ||
-    kind === "delegate.task"
-  ) {
-    if (kind === "code.search") return "search";
-    if (kind === "filesystem.read" || kind === "filesystem.list") return "read";
-    if (kind === "filesystem.write") return "sandbox";
-    if (kind === "git.status" || kind === "git.diff" || kind === "git.log")
-      return "git";
-    if (kind === "shell.exec") return "sandbox";
-    if (kind === "http.request") return "typing";
-    if (kind === "delegate.task") return "delegation";
-
-    return kind;
-  }
-
-  return "sandbox";
-}
-
-function activityBadgeClasses(kind: ActivityKind) {
-  if (kind === "typing") {
-    return "border-[#8b5cf6]/30 bg-[#8b5cf6]/10 text-[#c4b5fd]";
-  }
-
-  if (kind === "thinking") {
-    return "border-[#f59e0b]/30 bg-[#f59e0b]/10 text-[#fcd34d]";
-  }
-
-  if (kind === "search") {
-    return "border-[#1f6feb]/30 bg-[#1f6feb]/10 text-[#79c0ff]";
-  }
-
-  if (kind === "read") {
-    return "border-[#0ea5a4]/30 bg-[#0ea5a4]/10 text-[#99f6e4]";
-  }
-
-  if (kind === "git") {
-    return "border-[#22c55e]/30 bg-[#22c55e]/10 text-[#86efac]";
-  }
-
-  if (kind === "test") {
-    return "border-[#f59e0b]/30 bg-[#f59e0b]/10 text-[#fde68a]";
-  }
-
-  if (kind === "build" || kind === "install") {
-    return "border-[#94a3b8]/30 bg-[#94a3b8]/10 text-[#e2e8f0]";
-  }
-
-  return "border-[#1f6feb]/30 bg-[#1f6feb]/10 text-[#79c0ff]";
-}
-
-function presenceDotClasses(tone: PresenceTone) {
-  if (tone === "running") {
-    return "bg-[#38bdf8] shadow-[0_0_0_5px_rgba(56,189,248,0.14)] animate-pulse";
-  }
-
-  if (tone === "review") {
-    return "bg-[#f59e0b] shadow-[0_0_0_5px_rgba(245,158,11,0.14)]";
-  }
-
-  if (tone === "error") {
-    return "bg-[#ef4444] shadow-[0_0_0_5px_rgba(239,68,68,0.12)]";
-  }
-
-  return "bg-[#516274]";
-}
-
-function presenceTextClasses(tone: PresenceTone) {
-  if (tone === "running") {
-    return "text-[#a5e9ff]";
-  }
-
-  if (tone === "review") {
-    return "text-[#f7c56c]";
-  }
-
-  if (tone === "error") {
-    return "text-[#f5a1a1]";
-  }
-
-  return "text-[#4f6880]";
-}
-
-function runIsInFlight(status?: string | null) {
-  return (
-    status === "queued" ||
-    status === "planning" ||
-    status === "running" ||
-    status === "waiting_for_approval"
-  );
-}
-
-const STALE_IN_FLIGHT_RUN_MS = 30 * 60 * 1000;
-
-function runCountsAsInFlight(run: CommandRun) {
-  if (!runIsInFlight(run.status)) {
-    return false;
-  }
-
-  const startedAt = Date.parse(run.createdAt);
-  return Number.isNaN(startedAt)
-    ? true
-    : Date.now() - startedAt < STALE_IN_FLIGHT_RUN_MS;
-}
-
-function runNeedsAttention(status?: string | null) {
-  return status === "failed" || status === "blocked" || status === "canceled";
-}
-
-function runStatusTone(status?: string | null) {
-  if (status === "running" || status === "planning") {
-    return {
-      dot: "bg-[#38bdf8] shadow-[0_0_0_6px_rgba(56,189,248,0.12)]",
-      text: "text-[#8fd8ff]",
-      border: "border-[#38bdf8]/18",
-      glow: "shadow-[0_0_0_1px_rgba(56,189,248,0.08),0_22px_48px_rgba(14,165,233,0.12)]",
-      rail: "from-[#38bdf8] via-[#1d4ed8] to-transparent",
-    };
-  }
-
-  if (status === "completed") {
-    return {
-      dot: "bg-[#34d399] shadow-[0_0_0_6px_rgba(52,211,153,0.12)]",
-      text: "text-[#86efac]",
-      border: "border-[#34d399]/16",
-      glow: "shadow-[0_18px_38px_rgba(5,150,105,0.08)]",
-      rail: "from-[#34d399] via-[#065f46] to-transparent",
-    };
-  }
-
-  if (status === "queued" || status === "waiting_for_approval") {
-    return {
-      dot: "bg-[#f59e0b] shadow-[0_0_0_6px_rgba(245,158,11,0.12)]",
-      text: "text-[#fcd34d]",
-      border: "border-[#f59e0b]/18",
-      glow: "shadow-[0_18px_38px_rgba(217,119,6,0.08)]",
-      rail: "from-[#f59e0b] via-[#92400e] to-transparent",
-    };
-  }
-
-  if (status === "blocked" || status === "failed") {
-    return {
-      dot: "bg-[#fb7185] shadow-[0_0_0_6px_rgba(251,113,133,0.12)]",
-      text: "text-[#fda4af]",
-      border: "border-[#fb7185]/18",
-      glow: "shadow-[0_18px_38px_rgba(225,29,72,0.09)]",
-      rail: "from-[#fb7185] via-[#9f1239] to-transparent",
-    };
-  }
-
-  return {
-    dot: "bg-[#64748b] shadow-[0_0_0_6px_rgba(100,116,139,0.10)]",
-    text: "text-[#cbd5e1]",
-    border: "border-white/8",
-    glow: "shadow-[0_18px_38px_rgba(15,23,42,0.10)]",
-    rail: "from-[#64748b] via-[#334155] to-transparent",
-  };
-}
-
-function escapeHtml(value: string) {
-  return value
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&#39;");
-}
-
-function renderMessageHtml(content: string) {
-  const raw = marked.parse(content, {
-    async: false,
-    breaks: true,
-    gfm: true,
-  }) as string;
-
-  return DOMPurify.sanitize(raw);
-}
-
-function isTextLikeMime(type: string) {
-  return (
-    type.startsWith("text/") ||
-    [
-      "application/json",
-      "application/xml",
-      "application/x-yaml",
-      "application/yaml",
-      "application/javascript",
-      "application/typescript",
-    ].includes(type)
-  );
-}
-
-function looksLikeTextDocument(name: string) {
-  return /\.(txt|md|markdown|json|csv|tsv|js|jsx|ts|tsx|py|rb|go|java|c|cpp|h|hpp|css|html|xml|yaml|yml|sql)$/i.test(
-    name,
-  );
-}
-
-function truncateAttachmentText(value: string, limit = 12000) {
-  const normalized = value.trim();
-  if (normalized.length <= limit) {
-    return normalized;
-  }
-
-  return `${normalized.slice(0, limit)}\n\n[Truncated after ${limit} characters]`;
-}
-
-async function readFileAsDataUrl(file: File) {
-  return await new Promise<string>((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () =>
-      resolve(typeof reader.result === "string" ? reader.result : "");
-    reader.onerror = () =>
-      reject(reader.error || new Error(`Failed to read ${file.name}.`));
-    reader.readAsDataURL(file);
-  });
-}
-
-async function readFileAsText(file: File) {
-  return await file.text();
-}
-
-async function buildComposerAttachment(
-  file: File,
-): Promise<ComposerAttachment> {
-  const baseAttachment: ComposerAttachment = {
-    id: `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
-    name: file.name || "Untitled",
-    mimeType: file.type || "application/octet-stream",
-    kind: "document",
-    size: file.size,
-  };
-
-  if (file.type.startsWith("image/")) {
-    return {
-      ...baseAttachment,
-      kind: "image",
-      previewUrl: await readFileAsDataUrl(file),
-    };
-  }
-
-  if (isTextLikeMime(file.type) || looksLikeTextDocument(file.name)) {
-    return {
-      ...baseAttachment,
-      kind: "text",
-      textContent: truncateAttachmentText(await readFileAsText(file)),
-    };
-  }
-
-  return {
-    ...baseAttachment,
-    kind: "document",
-    warning:
-      "Attached to the conversation, but binary text extraction is not available yet in the local runtime.",
-  };
-}
-
-function buildAttachmentContext(attachments: ComposerAttachment[]) {
-  if (attachments.length === 0) {
-    return "";
-  }
-
-  return [
-    "Attached context:",
-    ...attachments.map((attachment, index) => {
-      if (attachment.kind === "text" && attachment.textContent) {
-        return [
-          `${index + 1}. ${attachment.name} (${attachment.mimeType || "text"})`,
-          truncateText(attachment.textContent, 5000),
-        ].join("\n");
-      }
-
-      if (attachment.kind === "image") {
-        return `${index + 1}. ${attachment.name} (${attachment.mimeType || "image"})\nAn image is attached in the UI for visual reference. The current local runtime may not fully inspect image pixels for every provider yet, so rely on this image when a vision-capable path is available.`;
-      }
-
-      return `${index + 1}. ${attachment.name} (${attachment.mimeType || "document"})\n${attachment.warning || "A document is attached for reference."}`;
-    }),
-  ].join("\n\n");
-}
-
-function mergePromptWithAttachments(
-  prompt: string,
-  attachments: ComposerAttachment[],
-) {
-  const attachmentContext = buildAttachmentContext(attachments);
-  return attachmentContext ? `${prompt}\n\n${attachmentContext}` : prompt;
-}
-
-function hasImageAttachments(attachments: ComposerAttachment[]) {
-  return attachments.some(
-    (attachment) =>
-      attachment.kind === "image" && typeof attachment.previewUrl === "string",
-  );
-}
-
-function shouldConsiderSandboxExecution(prompt: string) {
-  return /\b(create|make|write|save|export|edit|modify|delete|rename|move|copy|terminal|command|shell|run|execute|install|build|test|debug|fix|folder|directory|file|pdf|docx|csv|json|script|repo|git|read|inspect|check|list|open)\b/i.test(
-    prompt,
-  );
-}
-
-function cleanRequestedPathName(value: string) {
-  return value
-    .replace(/\s+(?:please|thanks|thank you)$/i, "")
-    .replace(/[.?!]+$/g, "")
-    .trim()
-    .replace(/[/:]/g, "-")
-    .replace(/\s+/g, " ");
-}
-
-function slugifyFileStem(value: string) {
-  const slug = cleanRequestedPathName(value)
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "");
-  return slug || "notes";
-}
-
-function inferRecentLocalDirectory(
-  messages: Array<Pick<ChatMessage, "content" | "contextText">> = [],
-) {
-  const pathPattern = /\/Users\/vanshsehrawat\/[^\n`]+/g;
-  for (const message of [...messages].reverse()) {
-    const text = `${message.contextText ?? ""}\n${message.content ?? ""}`;
-    const matches = text.match(pathPattern) ?? [];
-    for (const rawPath of matches.reverse()) {
-      const cleaned = rawPath
-        .replace(/[),.;\]]+$/g, "")
-        .replace(/^['"`]+|['"`]+$/g, "")
-        .trim();
-      if (!cleaned) {
-        continue;
-      }
-      return /\.[a-z0-9]{1,8}$/i.test(cleaned)
-        ? cleaned.replace(/\/[^/]+$/, "")
-        : cleaned;
-    }
-  }
-  return "";
-}
-
-function buildSimpleTextFileContent(topic: string, prompt: string) {
-  const title = cleanRequestedPathName(topic || "Notes");
-  return [
-    title,
-    "",
-    `This text file was created from the request: ${prompt.trim()}`,
-    "",
-    topic
-      ? `${title} is the subject requested for this note. You can edit or expand this file whenever you want.`
-      : "You can edit or expand this file whenever you want.",
-    "",
-  ].join("\n");
-}
-
-function buildDeterministicLocalCommand(
-  prompt: string,
-  previousThread: Array<Pick<ChatMessage, "content" | "contextText">> = [],
-) {
-  if (
-    /\b(?:create|make)\b/i.test(prompt) &&
-    /\b(?:folder|directory)\b/i.test(prompt)
-  ) {
-    const nameMatch =
-      prompt.match(/\b(?:named|called)\s+["'`]?(.+?)["'`]?\s*$/i) ??
-      prompt.match(/\b(?:folder|directory)\s+["'`]?([^"'`]+?)["'`]?\s*$/i);
-    const requestedName = cleanRequestedPathName(nameMatch?.[1] ?? "");
-    if (!requestedName) {
-      return null;
-    }
-
-    const basePath = /\bdesktop\b/i.test(prompt)
-      ? `${DEFAULT_AGENT_WORKSPACE}/Desktop`
-      : /\bsame folder\b/i.test(prompt)
-        ? inferRecentLocalDirectory(previousThread) || DEFAULT_AGENT_WORKSPACE
-        : DEFAULT_AGENT_WORKSPACE;
-    const targetPath = `${basePath}/${requestedName}`;
-
-    return {
-      kind: "create_folder" as const,
-      targetPath,
-      command: [
-        `mkdir -p ${shellQuote(targetPath)}`,
-        `test -d ${shellQuote(targetPath)}`,
-        `printf ${shellQuote(`CREATED ${targetPath}\n`)}`,
-      ].join(" && "),
-      cwd: basePath,
-      reasoning: `Create and verify the requested folder at ${targetPath}.`,
-    };
-  }
-
-  if (
-    /\b(?:create|make|write|generate|save)\b/i.test(prompt) &&
-    /\b(?:txt|text file|\.txt|file)\b/i.test(prompt)
-  ) {
-    const topic =
-      cleanRequestedPathName(
-        prompt.match(/\b(?:about|describing|explaining)\s+(.+?)$/i)?.[1] ?? "",
-      ) || "notes";
-    const explicitName = cleanRequestedPathName(
-      prompt.match(/\b(?:named|called)\s+["'`]?(.+?)["'`]?\s*$/i)?.[1] ?? "",
-    );
-    const fileName = /\.[a-z0-9]{1,8}$/i.test(explicitName)
-      ? explicitName
-      : `${slugifyFileStem(explicitName || topic)}.txt`;
-    const basePath = /\bdesktop\b/i.test(prompt)
-      ? `${DEFAULT_AGENT_WORKSPACE}/Desktop`
-      : /\bsame folder\b/i.test(prompt)
-        ? inferRecentLocalDirectory(previousThread) || DEFAULT_AGENT_WORKSPACE
-        : DEFAULT_AGENT_WORKSPACE;
-    const targetPath = `${basePath}/${fileName}`;
-    const content = buildSimpleTextFileContent(topic, prompt);
-
-    return {
-      kind: "create_text_file" as const,
-      targetPath,
-      command: [
-        `mkdir -p ${shellQuote(basePath)}`,
-        `printf %s ${shellQuote(content)} > ${shellQuote(targetPath)}`,
-        `test -f ${shellQuote(targetPath)}`,
-        `printf ${shellQuote(`CREATED ${targetPath}\n`)}`,
-      ].join(" && "),
-      cwd: basePath,
-      reasoning: `Create and verify the requested text file at ${targetPath}.`,
-    };
-  }
-
-  return null;
-}
-
-function formatDeterministicCommandReply(input: {
-  plan: NonNullable<ReturnType<typeof buildDeterministicLocalCommand>>;
-  result: RuntimeExecuteResult;
-}) {
-  const exitCode =
-    typeof input.result.exitCode === "number"
-      ? input.result.exitCode
-      : input.result.ok
-        ? 0
-        : 1;
-
-  if (input.plan.kind === "create_folder" && input.result.ok) {
-    return [
-      "Done - I created and verified the folder on your Mac:",
-      "",
-      `\`${input.plan.targetPath}\``,
-      "",
-      `Exit code: ${exitCode}.`,
-    ].join("\n");
-  }
-
-  if (input.plan.kind === "create_text_file" && input.result.ok) {
-    return [
-      "Done - I created and verified the text file on your Mac:",
-      "",
-      `\`${input.plan.targetPath}\``,
-      "",
-      `Exit code: ${exitCode}.`,
-    ].join("\n");
-  }
-
-  return [
-    `I tried to create \`${input.plan.targetPath}\`, but the local bridge reported a failure.`,
-    "",
-    `Exit code: ${exitCode}.`,
-    input.result.stderr ? `stderr:\n${input.result.stderr}` : "",
-    input.result.error ? `error:\n${input.result.error}` : "",
-  ]
-    .filter(Boolean)
-    .join("\n\n");
-}
-
-function withVisionRuntimeAgent(
-  agent: WorkspaceAgent,
-  options: {
-    hasImageInput: boolean;
-    githubModelsReady: boolean;
-  },
-) {
-  if (!options.hasImageInput) {
-    return agent;
-  }
-
-  if (options.githubModelsReady) {
-    return {
-      ...agent,
-      provider: "GitHub",
-      model: "openai/gpt-4.1",
-      systemPrompt: [
-        agent.systemPrompt,
-        "An image attachment is present in the current user turn.",
-        "Inspect the image directly and answer from what you can see.",
-      ].join("\n\n"),
-    };
-  }
-
-  return {
-    ...agent,
-    systemPrompt: [
-      agent.systemPrompt,
-      "An image attachment is present in the current user turn.",
-      "If you cannot inspect image pixels in this provider path, state that clearly and continue with whatever context is available.",
-    ].join("\n\n"),
-  };
-}
-
-function toRuntimeConversation(
-  messages: Array<
-    Pick<
-      ChatMessage,
-      | "role"
-      | "content"
-      | "sender"
-      | "timestamp"
-      | "contextText"
-      | "attachmentIds"
-    >
-  >,
-  attachmentsById: Record<string, ComposerAttachment>,
-) {
-  return messages.map((message) => ({
-    role: message.role,
-    content: truncateText(message.contextText || message.content, 6000),
-    sender: message.sender,
-    timestamp: message.timestamp,
-    attachments: (message.attachmentIds ?? [])
-      .map((attachmentId) => attachmentsById[attachmentId])
-      .filter((attachment): attachment is ComposerAttachment =>
-        Boolean(
-          attachment &&
-          attachment.kind === "image" &&
-          typeof attachment.previewUrl === "string",
-        ),
-      )
-      .map((attachment) => ({
-        type: "image" as const,
-        url: attachment.previewUrl!,
-        mimeType: attachment.mimeType,
-        name: attachment.name,
-      })),
-  }));
-}
-
-function reviewCommand(
-  command: string,
-  sandboxMode: SandboxMode,
-): CommandReview {
-  const trimmedCommand = command.trim();
-
-  if (!trimmedCommand) {
-    return { status: "safe", reasons: [] };
-  }
-
-  if (sandboxMode === "none") {
-    return {
-      status: "blocked",
-      reasons: ["Sandbox execution is disabled for this agent."],
-    };
-  }
-
-  if (TRUSTED_PERSONAL_TERMINAL_ACCESS && sandboxMode === "workspace-write") {
-    return { status: "safe", reasons: [] };
-  }
-
-  for (const pattern of blockedCommandPatterns) {
-    if (pattern.test(trimmedCommand)) {
-      return {
-        status: "blocked",
-        reasons: [
-          "This command is blocked by the local sandbox policy before it can run.",
-        ],
-      };
-    }
-  }
-
-  if (sandboxMode === "read-only") {
-    if (shellRiskPattern.test(trimmedCommand)) {
-      return {
-        status: "blocked",
-        reasons: [
-          "Read-only mode blocks shell operators, redirection, and command chaining.",
-        ],
-      };
-    }
-
-    const baseCommand = trimmedCommand.split(/\s+/)[0] ?? "";
-    if (!readOnlyCommands.has(baseCommand)) {
-      return {
-        status: "blocked",
-        reasons: [`Read-only mode does not allow "${baseCommand}".`],
-      };
-    }
-  }
-
-  const reasons = commandApprovalPatterns
-    .filter((entry) => entry.pattern.test(trimmedCommand))
-    .map((entry) => entry.reason);
-
-  if (shellRiskPattern.test(trimmedCommand)) {
-    reasons.push(
-      "It uses shell operators, redirection, or variable expansion.",
-    );
-  }
-
-  return {
-    status: reasons.length > 0 ? "approval" : "safe",
-    reasons: uniqueStrings(reasons),
-  };
-}
-
-function normalizeSandboxCommand(command: string) {
-  return command.trim();
-}
-
-function shouldAutoApproveWorkspaceCommand(agent: WorkspaceAgent) {
-  return (
-    agent.id === BUILDER_AGENT_ID ||
-    (TRUSTED_PERSONAL_TERMINAL_ACCESS &&
-      agent.source === "custom" &&
-      agent.permissions.terminal &&
-      agent.sandboxMode === "workspace-write")
-  );
-}
-
-function formatCommandReviewContent(
-  command: string,
-  reasons: string[],
-  prefix: string,
-) {
-  return [
-    prefix,
-    `Command: \`${command}\``,
-    "Why it was flagged:",
-    ...reasons.map((reason) => `- ${reason}`),
-  ].join("\n");
-}
-
-function deriveTools(permissions: AgentPermissions) {
-  const tools: string[] = [];
-  if (permissions.browser) tools.push("Browser & Web");
-  if (permissions.terminal) tools.push("Terminal");
-  if (permissions.files) tools.push("Files");
-  if (permissions.git) tools.push("Git");
-  if (permissions.delegation) tools.push("Delegation");
-  return tools;
-}
-
-function getEnabledToolDefinitions(permissions: AgentPermissions) {
-  const enabledToolNames: ToolName[] = [];
-
-  if (permissions.browser) {
-    enabledToolNames.push("browser.fetch", "browser.extract", "http.request");
-  }
-  if (permissions.files) {
-    enabledToolNames.push(
-      "filesystem.read",
-      "filesystem.write",
-      "filesystem.list",
-      "code.search",
-    );
-  }
-  if (permissions.git) {
-    enabledToolNames.push("git.status", "git.diff", "git.log");
-  }
-  if (permissions.terminal) {
-    enabledToolNames.push("shell.exec");
-  }
-  if (permissions.delegation) {
-    enabledToolNames.push("delegate.task");
-  }
-
-  return TOOL_DEFINITIONS.filter((tool) =>
-    enabledToolNames.includes(tool.name),
-  );
-}
-
-function capabilitySummary(permissions: AgentPermissions) {
-  const enabledTools = getEnabledToolDefinitions(permissions);
-  const categoryOrder: ToolDefinition["category"][] = [
-    "browser",
-    "filesystem",
-    "code",
-    "git",
-    "shell",
-    "http",
-    "delegation",
-  ];
-  return categoryOrder
-    .map((category) => {
-      const categoryTools = enabledTools.filter(
-        (tool) => tool.category === category,
-      );
-      if (categoryTools.length === 0) {
-        return null;
-      }
-
-      const label =
-        category === "browser"
-          ? "Browser"
-          : category === "filesystem"
-            ? "Files"
-            : category === "code"
-              ? "Code Search"
-              : category === "git"
-                ? "Git"
-                : category === "shell"
-                  ? "Sandbox"
-                  : category === "http"
-                    ? "HTTP"
-                    : "Delegation";
-
-      return {
-        category,
-        label,
-        tools: categoryTools,
-      };
-    })
-    .filter(Boolean) as Array<{
-    category: ToolDefinition["category"];
-    label: string;
-    tools: ToolDefinition[];
-  }>;
-}
-
-function buildWelcomeThread(agent: WorkspaceAgent): ChatMessage[] {
-  void agent;
-  return [];
-}
-
-function mapLiveAgentToWorkspaceAgent(agent: Agent): WorkspaceAgent {
-  const livePermissions: AgentPermissions = {
-    terminal: agent.status !== "offline",
-    browser: false,
-    files: true,
-    git: false,
-    delegation: true,
-  };
-
-  return {
-    ...agent,
-    source: "connected",
-    provider: "Live runtime",
-    model: "external bridge",
-    objective:
-      agent.currentActivity ||
-      `${agent.name} is connected through the existing runtime bridge.`,
-    systemPrompt: `Connected runtime profile for ${agent.name}.`,
-    specialties: agent.skills.length > 0 ? agent.skills : ["Realtime sync"],
-    tools: deriveTools(livePermissions),
-    workspace: "Managed by connected runtime",
-    sandboxMode: "workspace-write",
-    permissions: livePermissions,
-  };
-}
-
-function loadStoredValue<T>(key: string, fallback: T): T {
-  if (typeof window === "undefined") {
-    return fallback;
-  }
-
-  try {
-    const rawValue = window.localStorage.getItem(key);
-    if (!rawValue) {
-      return fallback;
-    }
-
-    return JSON.parse(rawValue) as T;
-  } catch {
-    return fallback;
-  }
-}
-
-function truncateText(value: string, limit = 6000) {
-  if (value.length <= limit) {
-    return value;
-  }
-
-  return `${value.slice(0, limit)}\n...[trimmed for local storage]`;
-}
-
-function trimMessagesForStorage(
-  messagesByAgent: Record<string, ChatMessage[]>,
-  limitPerAgent = 40,
-) {
-  return Object.fromEntries(
-    Object.entries(messagesByAgent).map(([agentId, messages]) => [
-      agentId,
-      messages.slice(-limitPerAgent).map((message) => ({
-        ...message,
-        content: truncateText(message.content),
-      })),
-    ]),
-  );
-}
-
-function trimChannelMessagesForStorage(
-  channelMessagesById: Record<string, ChannelMessage[]>,
-  limitPerChannel = 40,
-) {
-  return Object.fromEntries(
-    Object.entries(channelMessagesById).map(([channelId, messages]) => [
-      channelId,
-      messages.slice(-limitPerChannel).map((message) => ({
-        ...message,
-        content: truncateText(message.content),
-      })),
-    ]),
-  );
-}
-
-function trimCommandRunsForStorage(commandRuns: CommandRun[], limit = 80) {
-  return commandRuns.slice(0, limit).map((run) => ({
-    ...run,
-    stdout: truncateText(run.stdout ?? "", 8000),
-    stderr: truncateText(run.stderr ?? "", 8000),
-    artifacts: (run.artifacts ?? []).slice(0, 8),
-  }));
-}
-
-function safeSetStoredValue(key: string, value: unknown) {
-  if (typeof window === "undefined") {
-    return;
-  }
-
-  try {
-    window.localStorage.setItem(key, JSON.stringify(value));
-  } catch (error) {
-    console.warn(`Skipping ${key} persistence after storage quota error.`, error);
-    try {
-      window.localStorage.removeItem(key);
-    } catch {
-      // Persistence is best-effort; keep the live app responsive.
-    }
-  }
-}
-
-function runLocalStorageMaintenance() {
-  if (typeof window === "undefined") {
-    return;
-  }
-
-  const versionKey = "control-room.storage-maintenance-version";
-  try {
-    const orchestrationStore = window.localStorage.getItem("orchestration-store");
-    if (orchestrationStore && orchestrationStore.length > 500_000) {
-      window.localStorage.removeItem("orchestration-store");
-      window.localStorage.removeItem(versionKey);
-    }
-  } catch {
-    // Ignore cleanup failures; persistence is best-effort.
-  }
-
-  if (window.localStorage.getItem(versionKey) === STORAGE_MAINTENANCE_VERSION) {
-    return;
-  }
-
-  [
-    STORAGE_KEYS.messages,
-    `${STORAGE_KEYS.messages}.reset-version`,
-    STORAGE_KEYS.channelMessages,
-    `${STORAGE_KEYS.channelMessages}.reset-version`,
-    STORAGE_KEYS.commandRuns,
-    "orchestration-store",
-  ].forEach((key) => {
-    try {
-      window.localStorage.removeItem(key);
-    } catch {
-      // Ignore cleanup failures.
-    }
-  });
-
-  try {
-    window.localStorage.setItem(versionKey, STORAGE_MAINTENANCE_VERSION);
-  } catch {
-    // If even the version marker cannot be written, the safe setters below
-    // will still prevent crashes during the current session.
-  }
-}
-
-function delay(milliseconds: number) {
-  return new Promise((resolve) => window.setTimeout(resolve, milliseconds));
-}
-
-function loadConversationStoredValue<T>(key: string, fallback: T): T {
-  if (typeof window === "undefined") {
-    return fallback;
-  }
-
-  const resetKey = `${key}.reset-version`;
-  if (window.localStorage.getItem(resetKey) !== CONVERSATION_RESET_VERSION) {
-    window.localStorage.removeItem(key);
-    window.localStorage.setItem(resetKey, CONVERSATION_RESET_VERSION);
-    return fallback;
-  }
-
-  return loadStoredValue(key, fallback);
-}
-
-function createDefaultMessages(agents: WorkspaceAgent[]) {
-  return Object.fromEntries(
-    agents.map((agent) => [agent.id, [] satisfies ChatMessage[]]),
-  ) as Record<string, ChatMessage[]>;
-}
-
-function createDefaultChannelMessages(
-  channels: CollaborationChannel[],
-  _agents: WorkspaceAgent[],
-) {
-  return Object.fromEntries(
-    channels.map((channel) => {
-      return [channel.id, [] satisfies ChannelMessage[]];
-    }),
-  ) as Record<string, ChannelMessage[]>;
-}
-
-function slugifyLabel(value: string) {
-  return value
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "");
-}
-
-function extractMentionSlugs(text: string) {
-  const matches = text.toLowerCase().match(/@[a-z0-9-]+/g) ?? [];
-  return uniqueStrings(matches.map((match) => match.slice(1)));
-}
-
-function findChannelMentionQuery(text: string) {
-  const match = text.match(/(?:^|\s)@([a-z0-9-]*)$/i);
-  return match ? match[1].toLowerCase() : null;
-}
-
-function insertMentionAtEnd(text: string, slug: string) {
-  if (!text.trim()) {
-    return `@${slug} `;
-  }
-
-  if (/(?:^|\s)@[a-z0-9-]*$/i.test(text)) {
-    return text.replace(/@[a-z0-9-]*$/i, `@${slug} `);
-  }
-
-  return `${text}${/\s$/.test(text) ? "" : " "}@${slug} `;
-}
-
-function buildChannelTaskPrompt(
-  lead: WorkspaceAgent,
-  member: WorkspaceAgent,
-  prompt: string,
-  target: string,
-  handoffContext?: string,
-) {
-  return [
-    `Lead agent: ${lead.name}`,
-    `Shared task: ${prompt}`,
-    `Your role in this channel: ${member.role}`,
-    `Your objective: ${member.objective}`,
-    target ? `Your channel target: ${target}` : "",
-    handoffContext ? `Handoff context:\n${handoffContext}` : "",
-    "Reply with your slice of the work, what you checked, blockers if any, and the next handoff the room should know about.",
-    "If you need another channel member, explicitly mention them like @builder and explain what they should take over.",
-  ].join("\n\n");
-}
-
-function buildChannelLeadSummary(
-  lead: WorkspaceAgent,
-  prompt: string,
-  collaboratorOutputs: Array<{ agent: WorkspaceAgent; text: string }>,
-) {
-  const summaryLines = collaboratorOutputs.map(({ agent, text }) => {
-    const compressed = text.replace(/\s+/g, " ").trim().slice(0, 180);
-    return `@${slugifyLabel(agent.name)}: ${compressed}${compressed.length >= 180 ? "..." : ""}`;
-  });
-
-  return [
-    `I opened collaboration on: ${prompt}`,
-    summaryLines.length > 0 ? "Team updates:" : "",
-    ...summaryLines,
-    summaryLines.length > 0
-      ? "Next move: keep the lead plan tight, then use the sandbox lane or direct threads for the heaviest slice."
-      : `${lead.name} can continue solo from here.`,
-  ]
-    .filter(Boolean)
-    .join("\n\n");
-}
-
-function buildChannelRoundReview(
-  lead: WorkspaceAgent,
-  roundNumber: number,
-  waveResults: Array<{
-    collaborator: WorkspaceAgent;
-    response: { text: string; ok: boolean };
-  }>,
-  pendingAssignments: Array<{ agent: WorkspaceAgent }>,
-) {
-  const successes = waveResults.filter(({ response }) => response.ok);
-  const blockers = waveResults.filter(({ response }) => !response.ok);
-
-  const reviewLines = [
-    `Round ${roundNumber} review from ${lead.name}:`,
-    successes.length > 0
-      ? `Completed: ${successes.map(({ collaborator }) => `@${slugifyLabel(collaborator.name)}`).join(", ")}`
-      : "",
-    blockers.length > 0
-      ? `Blocked: ${blockers.map(({ collaborator }) => `@${slugifyLabel(collaborator.name)}`).join(", ")}`
-      : "",
-    pendingAssignments.length > 0
-      ? `Next up: ${pendingAssignments.map(({ agent }) => `@${slugifyLabel(agent.name)}`).join(", ")}`
-      : "No more specialist follow-ups are needed. I’m stitching the room together now.",
-  ].filter(Boolean);
-
-  return reviewLines.join("\n\n");
-}
-
-function toTitleCase(value: string) {
-  return value.replace(
-    /\w\S*/g,
-    (word) => word.charAt(0).toUpperCase() + word.slice(1),
-  );
-}
-
-function buildGalaxyChannelTitle(prompt: string) {
-  const cleaned = prompt.replace(/[#@]/g, " ").replace(/\s+/g, " ").trim();
-  const words = cleaned
-    .split(" ")
-    .filter(Boolean)
-    .filter(
-      (word) =>
-        ![
-          "please",
-          "can",
-          "you",
-          "help",
-          "with",
-          "for",
-          "the",
-          "a",
-          "an",
-          "and",
-        ].includes(word.toLowerCase()),
-    )
-    .slice(0, 5);
-
-  if (words.length === 0) {
-    return "New Channel";
-  }
-
-  return toTitleCase(words.join(" "));
-}
-
-function formatChannelHandle(title: string) {
-  return `#${slugifyLabel(title) || "channel"}`;
-}
-
-function shouldGalaxyCreateChannel(prompt: string) {
-  const normalized = prompt.toLowerCase();
-  const simpleThreadSignals = [
-    "read this image",
-    "read this screenshot",
-    "describe this image",
-    "describe this screenshot",
-    "what is in this image",
-    "what's in this image",
-    "what is in this screenshot",
-    "what's in this screenshot",
-    "look at this image",
-    "look at this screenshot",
-    "analyze this image",
-    "analyze this screenshot",
-    "what does this say",
-    "transcribe this image",
-    "caption this image",
-    "summarize this",
-    "quick question",
-  ];
-  const explicitSignals = [
-    "channel",
-    "delegate",
-    "assign",
-    "handoff",
-    "team",
-    "agents",
-    "collaborate",
-    "split this",
-    "work on this",
-    "need research",
-    "need code",
-    "need review",
-  ];
-  const specialistSignals = [
-    "build",
-    "implement",
-    "code",
-    "research",
-    "scrape",
-    "browser",
-    "docs",
-    "compare",
-    "review",
-    "test",
-    "qa",
-    "ship",
-    "plan",
-    "architecture",
-    "refactor",
-    "debug",
-  ];
-  const multiStepSignals = [
-    " and ",
-    " then ",
-    " after that ",
-    " compare ",
-    " plan and ",
-    " research and ",
-    " build and ",
-    " review and ",
-  ];
-
-  if (simpleThreadSignals.some((signal) => normalized.includes(signal))) {
-    return false;
-  }
-
-  const mentionCount = extractMentionSlugs(prompt).length;
-  if (
-    mentionCount > 0 &&
-    explicitSignals.some((signal) => normalized.includes(signal))
-  ) {
-    return true;
-  }
-
-  if (explicitSignals.some((signal) => normalized.includes(signal))) {
-    return true;
-  }
-
-  const matchedSpecialists = specialistSignals.filter((signal) =>
-    normalized.includes(signal),
-  ).length;
-  const hasMultiStepIntent = multiStepSignals.some((signal) =>
-    normalized.includes(signal),
-  );
-
-  if (mentionCount > 0) {
-    return matchedSpecialists >= 2 || hasMultiStepIntent;
-  }
-
-  return matchedSpecialists >= 2 && hasMultiStepIntent;
-}
-
-function shouldUseInteractiveBrowser(
-  agent: WorkspaceAgent,
-  prompt: string,
-  browserUseReady: boolean,
-) {
-  if (!agent.permissions.browser || !browserUseReady) {
-    return false;
-  }
-
-  const normalized = prompt.toLowerCase();
-  const browserSignals = [
-    "browse",
-    "browser",
-    "website",
-    "site",
-    "web",
-    "search",
-    "scrape",
-    "extract",
-    "open",
-    "navigate",
-    "twitter",
-    "x.com",
-    "linkedin",
-    "reddit",
-    "youtube",
-  ];
-
-  return browserSignals.some((signal) => normalized.includes(signal));
-}
-
-function selectGalaxyChannelMembers(prompt: string, agents: WorkspaceAgent[]) {
-  const normalized = prompt.toLowerCase();
-  const selected = new Set<string>([GALAXY_AGENT_ID]);
-
-  if (/(plan|architecture|system|roadmap|scope|design)/.test(normalized)) {
-    selected.add("architect");
-  }
-
-  if (
-    /(build|implement|code|refactor|fix|debug|terminal|sandbox|file|git|ship)/.test(
-      normalized,
-    )
-  ) {
-    selected.add("builder");
-  }
-
-  if (
-    /(research|docs|compare|scrape|browser|website|search|market|analyze)/.test(
-      normalized,
-    )
-  ) {
-    selected.add("researcher");
-  }
-
-  if (/(review|qa|test|validate|regression|check)/.test(normalized)) {
-    selected.add("qa-guard");
-  }
-
-  if (/(triage|ops|fast|quick|summarize|summary)/.test(normalized)) {
-    selected.add("sprinter");
-  }
-
-  if (selected.size === 1) {
-    selected.add("architect");
-    selected.add("builder");
-  }
-
-  return agents.filter((agent) => selected.has(agent.id));
-}
-
-function buildGalaxyMemberTargets(prompt: string, members: WorkspaceAgent[]) {
-  return Object.fromEntries(
-    members.map((member) => {
-      const target =
-        member.id === GALAXY_AGENT_ID
-          ? `Lead the room for "${prompt}", keep the work coordinated, and review every specialist update before reporting back.`
-          : member.id === "architect"
-            ? `Turn "${prompt}" into a crisp plan, define the work slices, and identify the cleanest handoff order.`
-            : member.id === "builder"
-              ? `Own the implementation-heavy part of "${prompt}", including code, files, terminal work, and concrete next steps.`
-              : member.id === "researcher"
-                ? `Gather outside context for "${prompt}", including browsing, comparisons, docs, or scraping-style research if needed.`
-                : member.id === "qa-guard"
-                  ? `Review "${prompt}" for regressions, test gaps, and risky assumptions before sign-off.`
-                  : member.id === "sprinter"
-                    ? `Keep "${prompt}" moving with fast triage, concise summaries, and unblockers for the room.`
-                    : member.objective;
-
-      return [member.id, target];
-    }),
-  ) as Record<string, string>;
-}
-
-function inferHandoffAgentsFromText(
-  text: string,
-  members: WorkspaceAgent[],
-  currentAgentId: string,
-) {
-  const mentionSlugs = extractMentionSlugs(text);
-  return members.filter((member) => {
-    if (member.id === currentAgentId) {
-      return false;
-    }
-
-    return mentionSlugs.includes(slugifyLabel(member.name));
-  });
-}
-
-function pickAccent(index: number) {
-  return accentPalette[index % accentPalette.length];
-}
-
-function presetDisplayModel(preset: (typeof providerPresets)[number]) {
-  return "displayModel" in preset && preset.displayModel
-    ? preset.displayModel
-    : preset.model;
-}
-
-function generateAgentReply(
-  agent: WorkspaceAgent,
-  prompt: string,
-  delegations: DelegationTask[],
-) {
-  const ownQueue = delegations.filter(
-    (task) => task.assigneeId === agent.id && task.status !== "done",
-  ).length;
-  const promptLower = prompt.toLowerCase();
-
-  let opening =
-    "I’d translate this into a clear next action with a small first slice.";
-
-  if (promptLower.includes("bug") || promptLower.includes("fix")) {
-    opening =
-      "I’d start by isolating the failure and checking the smallest thing that can prove what is wrong.";
-  } else if (promptLower.includes("design") || promptLower.includes("ui")) {
-    opening =
-      "I’d first pin down the experience you want, then shape the screen around the real workflow.";
-  } else if (promptLower.includes("deploy") || promptLower.includes("ship")) {
-    opening =
-      "I’d keep the release path tight: smallest shippable slice, quick verification, clear rollback.";
-  } else if (promptLower.includes("research")) {
-    opening =
-      "I’d gather a few strong reference points and turn them into a short, useful brief.";
-  } else if (
-    /\b(hey|hi|hello|yo|how are you|how r you|whats up|what's up)\b/i.test(
-      prompt,
-    )
-  ) {
-    return `Hey, I’m here. What do you want to work on?`;
-  }
-
-  const delegationLine = agent.permissions.delegation
-    ? "If it grows, I can split it into smaller pieces and keep the thread tidy."
-    : "I’ll stay focused on this thread and keep the next step simple.";
-
-  return ownQueue > 0
-    ? `${opening}\n\nI also see ${ownQueue} active ${ownQueue === 1 ? "item" : "items"} on my side, so I’ll keep this focused. ${delegationLine}`
-    : `${opening}\n\n${delegationLine}`;
-}
+import {
+  STORAGE_KEYS, PERSONAL_WORKSPACE_ID, CONVERSATION_RESET_VERSION,
+  STORAGE_MAINTENANCE_VERSION, blockedCommandPatterns, readOnlyCommands,
+  shellRiskPattern, TRUSTED_PERSONAL_TERMINAL_ACCESS, commandApprovalPatterns,
+  accentPalette, statusMeta, runStatusMeta, delegationMeta, channelMeta,
+  priorityMeta, executionModeMeta, viewItems, DEFAULT_AGENT_WORKSPACE,
+  CLOUD_BRIDGE_AGENT_ID, CLOUD_BRIDGE_INGEST_SECRET,
+  CLOUD_BRIDGE_SECRET_STORAGE_KEY, isLocalBrowserOrigin, CONTROL_ROOM_ROOT,
+  PDF_RESUME_GENERATOR_PATH, LEGACY_DEFAULT_WORKSPACES, GALAXY_AGENT_ID,
+  DEFAULT_CHANNEL_LEAD_AGENT_ID, BUILDER_AGENT_ID, STALE_IN_FLIGHT_RUN_MS,
+  builtInSkillCatalog, defaultAutomationOptions, defaultAgentConnectors,
+  automationOptionCatalog, connectorCatalog, composioManagedConnectorKeys,
+  providerPresets, emptyAgentDraft, emptyChannelDraft,
+} from "@/constants";
+import {
+  codexStyleBuilderDefaults, defaultCustomAgents, defaultDelegations,
+  defaultChannels,
+} from "@/data/default-agents";
+import {
+  uniqueStrings, asStringArray, parseList, resolveWorkspacePath,
+  normalizeAutomationOptions, normalizeAgentConnectors, asAgentPermissions,
+  normalizeAgentPermissions, normalizeChannelTargets, normalizeChannel,
+  normalizeChannelMessage, normalizeDelegationTask, deriveTools,
+  mergeDefaultCustomAgents, mapWorkspaceAgentRow, mapWorkspaceDelegationRow,
+  mapWorkspaceCommandRunRow, mapWorkspaceDispatcherDecisionRow,
+  mapWorkspaceContextPackageRow, mapWorkspaceTaskTreeRow,
+  mapWorkspaceVerifierReviewRow, mapWorkspacePlanReviewRow,
+  mapWorkspaceCircuitBreakerEventRow, mapWorkspaceKnowledgeGraphRow,
+  mapWorkspaceToolDraftRow, toLiveActivityKind, mapRuntimeRunRecord,
+  isCannedAgentSetupMessage, groupWorkspaceMessages, mergeMessagesByAgent,
+  sanitizeMessagesByAgent, customAgentsSignature, delegationSignature,
+  commandRunsSignature, taskTreesSignature, verifierReviewsSignature,
+  dispatcherDecisionsSignature, planReviewsSignature,
+  circuitBreakerEventsSignature, toolDraftsSignature, messageMapSignature,
+  contextPackagesSignature, knowledgeGraphsSignature,
+} from "@/lib/data-mappers";
+import {
+  activityBadgeClasses, presenceDotClasses, presenceTextClasses,
+  runIsInFlight, runCountsAsInFlight, runNeedsAttention, runStatusTone,
+  escapeHtml, renderMessageHtml, isTextLikeMime, looksLikeTextDocument,
+  truncateAttachmentText, readFileAsDataUrl, readFileAsText,
+  buildComposerAttachment, buildAttachmentContext, mergePromptWithAttachments,
+  hasImageAttachments, shouldConsiderSandboxExecution, cleanRequestedPathName,
+  slugifyFileStem, inferRecentLocalDirectory, buildSimpleTextFileContent,
+  buildDeterministicLocalCommand, formatDeterministicCommandReply,
+  withVisionRuntimeAgent, toRuntimeConversation, reviewCommand,
+  normalizeSandboxCommand, shouldAutoApproveWorkspaceCommand,
+  formatCommandReviewContent, getEnabledToolDefinitions, capabilitySummary,
+  enabledConnectorLabels, enabledAutomationLabels, connectorStatusLabel,
+  connectorStatusVariant, buildWelcomeThread, mapLiveAgentToWorkspaceAgent,
+  loadStoredValue, truncateText, trimMessagesForStorage,
+  trimChannelMessagesForStorage, trimCommandRunsForStorage, safeSetStoredValue,
+  runLocalStorageMaintenance, delay, loadConversationStoredValue,
+  createDefaultMessages, createDefaultChannelMessages, slugifyLabel,
+  extractMentionSlugs, findChannelMentionQuery, insertMentionAtEnd,
+  buildChannelTaskPrompt, buildChannelLeadSummary, buildChannelRoundReview,
+  toTitleCase, buildGalaxyChannelTitle, formatChannelHandle,
+  shouldGalaxyCreateChannel, shouldUseInteractiveBrowser,
+  shouldUseGmailConnector, getGmailRequestOptions, shouldSendGmailConnector,
+  shouldDraftGmailConnector, parseGmailMessageRequest,
+  formatGmailDraftInvocationReply, formatGmailConnectorReply,
+  formatGmailSendInvocationReply, isBrowserUseSessionFinished,
+  getBrowserUseSessionOutput, buildBrowserOperatorTask,
+  selectGalaxyChannelMembers, buildGalaxyMemberTargets,
+  inferHandoffAgentsFromText, pickAccent, presetDisplayModel,
+  generateAgentReply, shellQuote, encodePromptForShell,
+  extractResumeName, shouldUseResumePdfSkill, buildResumePdfSkillPlan,
+} from "@/lib/helpers";
 
 function App() {
   runLocalStorageMaintenance();
@@ -3617,6 +576,22 @@ function App() {
   const [isTriggeringAutomationId, setIsTriggeringAutomationId] = useState<
     string | null
   >(null);
+  const [isCreatingAutomationTemplate, setIsCreatingAutomationTemplate] =
+    useState<string | null>(null);
+  const [isCreatingActivityAutomation, setIsCreatingActivityAutomation] =
+    useState(false);
+  const [connectorAuthSessions, setConnectorAuthSessions] = useState<
+    RuntimeHealth["connectorSessions"]
+  >({});
+  const [connectorTokenDrafts, setConnectorTokenDrafts] = useState<
+    Record<string, string>
+  >({});
+  const [connectorAuthBusyKey, setConnectorAuthBusyKey] = useState<string | null>(
+    null,
+  );
+  const [connectorAuthMessage, setConnectorAuthMessage] = useState<string | null>(
+    null,
+  );
   const [attachmentLibrary, setAttachmentLibrary] = useState<
     Record<string, ComposerAttachment>
   >({});
@@ -3669,6 +644,13 @@ function App() {
   }, []);
 
   useEffect(() => {
+    if (!hasAgentRuntime) {
+      return;
+    }
+    void refreshConnectorAuth();
+  }, []);
+
+  useEffect(() => {
     if (automations.length === 0) {
       setAutomationRunsById({});
       return;
@@ -3714,11 +696,7 @@ function App() {
         setBrowserSessions((prev) =>
           prev.map((s) => (s.id === result.session!.id ? result.session! : s)),
         );
-        if (
-          result.session.status === "completed" ||
-          result.session.status === "stopped" ||
-          result.session.status === "failed"
-        ) {
+        if (isBrowserUseSessionFinished(result.session)) {
           if (browserPollRef.current) clearInterval(browserPollRef.current);
           browserPollRef.current = null;
         }
@@ -3735,7 +713,12 @@ function App() {
     setBrowserSessionError(null);
     try {
       const result = await createBrowserUseSession({
-        task: browserTaskDraft.trim(),
+        task: selectedAgent
+          ? buildBrowserOperatorTask({
+              agent: selectedAgent,
+              prompt: browserTaskDraft.trim(),
+            })
+          : browserTaskDraft.trim(),
         agentId: selectedAgent.id,
         agentName: selectedAgent.name,
       });
@@ -3784,8 +767,13 @@ function App() {
       timestamp: startedAt,
     });
 
+    const browserTask = buildBrowserOperatorTask({
+      agent: input.agent,
+      prompt: input.prompt,
+    });
+
     const result = await createBrowserUseSession({
-      task: input.prompt,
+      task: browserTask,
       agentId: input.agent.id,
       agentName: input.agent.name,
     });
@@ -3913,101 +901,13 @@ function App() {
     return approvalResult.result;
   }
 
-  async function collectLiveWebResearch(input: {
-    agent: WorkspaceAgent;
-    prompt: string;
-    activityId?: string;
-  }): Promise<RuntimeChatMessage | null> {
-    if (!input.agent.permissions.browser) {
-      return null;
-    }
-
-    const directUrls = extractHttpUrls(input.prompt);
-    const query = normalizeWebResearchQuery(input.prompt);
-    const wantsNews = /\b(latest|news|headlines|today|current|recent)\b/i.test(
-      input.prompt,
-    );
-    const targets =
-      directUrls.length > 0
-        ? directUrls.map((url) => ({ label: url, url }))
-        : [
-            ...(wantsNews
-              ? [
-                  {
-                    label: "Google News RSS",
-                    url: `https://news.google.com/rss/search?q=${encodeURIComponent(query)}`,
-                  },
-                ]
-              : []),
-            {
-              label: "DuckDuckGo Search",
-              url: `https://duckduckgo.com/html/?q=${encodeURIComponent(query)}`,
-            },
-          ];
-
-    const excerpts: Array<{ label: string; url: string; text: string }> = [];
-
-    for (const target of targets.slice(0, 2)) {
-      if (input.activityId) {
-        updateLiveActivity(input.activityId, (entry) => ({
-          ...entry,
-          status: "running",
-          detail: `Reading live web context from ${target.label}...`,
-          timestamp: new Date().toISOString(),
-        }));
-      }
-
-      const result = await invokeToolWithAutoApproval({
-        tool: "browser.extract",
-        agentId: input.agent.id,
-        workspacePath: input.agent.workspace || undefined,
-        sandboxMode: input.agent.sandboxMode,
-        parameters: {
-          url: target.url,
-          maxChars: 9000,
-          timeout: 30000,
-        },
-      });
-
-      if (result.ok && result.data) {
-        const extractedText =
-          typeof result.data.text === "string" ? result.data.text.trim() : "";
-        if (extractedText) {
-          excerpts.push({
-            label: target.label,
-            url: target.url,
-            text: extractedText.slice(0, 5000),
-          });
-        }
-      }
-    }
-
-    if (excerpts.length === 0) {
-      return null;
-    }
-
-    return {
-      role: "system",
-      content: [
-        "Live web research is available for this reply.",
-        "Do not say that you lack browsing or live web access.",
-        "Use the extracted context below to answer directly, and mention source URLs when relevant.",
-        ...excerpts.map(
-          (excerpt, index) =>
-            `Source ${index + 1}: ${excerpt.label}\nURL: ${excerpt.url}\nExtracted text:\n${excerpt.text}`,
-        ),
-      ].join("\n\n"),
-    };
-  }
-
   function withLiveWebContextPrompt(
     agent: WorkspaceAgent,
     options: {
       hasBrowserLane: boolean;
-      hasLiveResearch: boolean;
     },
   ): WorkspaceAgent {
-    if (!options.hasBrowserLane && !options.hasLiveResearch) {
+    if (!options.hasBrowserLane) {
       return agent;
     }
 
@@ -4016,11 +916,40 @@ function App() {
       systemPrompt: [
         agent.systemPrompt,
         "You are replying in a workspace that has browser capability.",
-        options.hasLiveResearch
-          ? "Live web context has been provided below. Use it directly and do not claim you lack browsing or live web access."
-          : "A browser lane was requested for this task. If live findings are unavailable, say the fetch/browser run did not return usable results rather than claiming browsing is unavailable in principle.",
-        "Never ask the user to paste links if live web context is already available in the conversation.",
-        "If the topic is fast-moving, be explicit about what the provided sources say and keep uncertainty tied to the sources, not to your access.",
+        "A browser lane was requested for this task. The browser session has been launched.",
+        "You can answer using any prior context, or acknowledge that the browser is running.",
+      ]
+        .filter(Boolean)
+        .join("\n\n"),
+    };
+  }
+
+  function withConnectorRuntimePrompt(agent: WorkspaceAgent): WorkspaceAgent {
+    const connectors = normalizeAgentConnectors(agent.permissions.connectors);
+    const connected = Object.entries(connectors)
+      .filter(([key, enabled]) => enabled && runtimeHealth.connectors?.[key])
+      .map(([key]) => {
+        const session = runtimeHealth.connectorSessions?.[key];
+        const label =
+          connectorCatalog.find((connector) => connector.key === key)?.label ||
+          key;
+        return session?.accountLabel
+          ? `${label} (${session.authType}, ${session.accountLabel})`
+          : label;
+      });
+
+    if (connected.length === 0) {
+      return agent;
+    }
+
+    return {
+      ...agent,
+      systemPrompt: [
+        agent.systemPrompt,
+        `Connected runtime connectors available to this agent: ${connected.join(", ")}.`,
+        "If the user asks to use one of these connectors, treat it as already authorized. Do not say you lack access unless the runtime connector call fails.",
+        "For Gmail, use the Gmail/Composio connector result when it is provided in the conversation instead of suggesting manual OAuth.",
+        "Do not launch Browser Use unless the user explicitly asks for a browser, live browsing, navigation, clicking, form filling, or a web page visit.",
       ]
         .filter(Boolean)
         .join("\n\n"),
@@ -4269,6 +1198,8 @@ function App() {
         files: agentDraft.files,
         git: agentDraft.git,
         delegation: agentDraft.delegation,
+        automations: agentDraft.automations,
+        connectors: agentDraft.connectors,
       }),
     [
       agentDraft.browser,
@@ -4276,6 +1207,8 @@ function App() {
       agentDraft.files,
       agentDraft.git,
       agentDraft.terminal,
+      agentDraft.automations,
+      agentDraft.connectors,
     ],
   );
   const activeDelegationCount = delegations.filter(
@@ -4364,7 +1297,142 @@ function App() {
 
     const nextHealth = await getAgentRuntimeHealth();
     setRuntimeHealth(nextHealth);
+    if (nextHealth.connectorSessions) {
+      setConnectorAuthSessions(nextHealth.connectorSessions);
+    }
     return nextHealth;
+  }
+
+  async function refreshConnectorAuth() {
+    if (!hasAgentRuntime) {
+      return;
+    }
+
+    const result = await listConnectorAuth();
+    if (!result.ok) {
+      setConnectorAuthMessage(result.error || "Failed to load connector auth.");
+      return;
+    }
+
+    setConnectorAuthSessions(result.sessions ?? {});
+    setRuntimeHealth((current) => ({
+      ...current,
+      connectors: result.connectors ?? current.connectors,
+      connectorSessions: result.sessions ?? current.connectorSessions,
+    }));
+  }
+
+  async function handleStartConnectorOAuth(provider: string) {
+    setConnectorAuthBusyKey(`${provider}:oauth`);
+    setConnectorAuthMessage(null);
+    const result = await startConnectorOAuth(provider);
+    setConnectorAuthBusyKey(null);
+
+    if (!result.ok || !result.authUrl) {
+      setConnectorAuthMessage(
+        result.error ||
+          `Could not start ${provider} OAuth. Add the client id/secret in the local runtime env first.`,
+      );
+      return;
+    }
+
+    window.open(result.authUrl, "_blank", "noopener,noreferrer");
+    const connectorProvider =
+      result.connectorProvider === "composio" ? "Composio" : provider;
+    setConnectorAuthMessage(
+      `Opened ${connectorProvider} auth for ${provider}. Complete it in the browser, then click Refresh Connectors.`,
+    );
+  }
+
+  async function handleSaveConnectorToken(provider: string) {
+    const token = connectorTokenDrafts[provider]?.trim();
+    if (!token) {
+      setConnectorAuthMessage(`Paste a ${provider} token first.`);
+      return;
+    }
+
+    setConnectorAuthBusyKey(`${provider}:token`);
+    setConnectorAuthMessage(null);
+    const result = await storeConnectorToken({
+      provider,
+      token,
+      label: provider,
+    });
+    setConnectorAuthBusyKey(null);
+
+    if (!result.ok) {
+      setConnectorAuthMessage(result.error || `Failed to save ${provider} token.`);
+      return;
+    }
+
+    setConnectorTokenDrafts((current) => ({ ...current, [provider]: "" }));
+    setConnectorAuthMessage(`${provider} token saved locally.`);
+    await refreshConnectorAuth();
+    await refreshRuntimeHealth();
+  }
+
+  async function handleDisconnectConnector(provider: string) {
+    setConnectorAuthBusyKey(`${provider}:disconnect`);
+    const result = await disconnectConnector(provider);
+    setConnectorAuthBusyKey(null);
+
+    if (!result.ok) {
+      setConnectorAuthMessage(result.error || `Failed to disconnect ${provider}.`);
+      return;
+    }
+
+    setConnectorAuthMessage(`${provider} disconnected.`);
+    await refreshConnectorAuth();
+    await refreshRuntimeHealth();
+  }
+
+  function handleEnableConnectorForAllAgents(connectorKey: AgentConnectorKey) {
+    const connector = connectorCatalog.find((item) => item.key === connectorKey);
+    const shouldEnableComposio = composioManagedConnectorKeys.has(connectorKey);
+
+    setCustomAgents((current) =>
+      current.map((agent) => {
+        const connectors = normalizeAgentConnectors(agent.permissions.connectors);
+        const automations = normalizeAutomationOptions(agent.permissions.automations);
+        const permissions = normalizeAgentPermissions({
+          ...agent.permissions,
+          connectors: {
+            ...connectors,
+            composio: connectors.composio || shouldEnableComposio,
+            [connectorKey]: true,
+          },
+          automations: connector?.automationKey
+            ? {
+                ...automations,
+                [connector.automationKey]: true,
+              }
+            : automations,
+        });
+
+        return {
+          ...agent,
+          permissions,
+          tools: deriveTools(permissions),
+        };
+      }),
+    );
+
+    setAgentDraft((current) => ({
+      ...current,
+      connectors: {
+        ...current.connectors,
+        composio: current.connectors.composio || shouldEnableComposio,
+        [connectorKey]: true,
+      },
+      automations: connector?.automationKey
+        ? {
+            ...current.automations,
+            [connector.automationKey]: true,
+          }
+        : current.automations,
+    }));
+
+    setConnectorAuthMessage(`${connector?.label || connectorKey} enabled for all agents.`);
   }
 
   async function refreshAutomations() {
@@ -4405,6 +1473,193 @@ function App() {
     }
 
     void refreshAutomations();
+  }
+
+  async function handleCreateAgentAutomationTemplate(
+    agent: WorkspaceAgent,
+    template: "manual-check" | "daily-brief" | "repo-watch" | "webhook",
+  ) {
+    if (!hasAgentRuntime) {
+      setAutomationError("Runtime is offline, so automation templates cannot be created yet.");
+      return;
+    }
+
+    const templateKey = `${agent.id}-${template}`;
+    setIsCreatingAutomationTemplate(templateKey);
+
+    const agentProfile = {
+      id: agent.id,
+      name: agent.name,
+      provider: agent.provider,
+      model: agent.model,
+      objective: agent.objective,
+      systemPrompt: agent.systemPrompt,
+      sandboxMode: agent.sandboxMode,
+      workspace: agent.workspace,
+      permissions: agent.permissions,
+    };
+    const templateConfig = {
+      "manual-check": {
+        name: `${agent.name} manual workspace check`,
+        trigger: { type: "manual" as const, config: {} },
+        action: {
+          type: "chat" as const,
+          payload: {
+            agent: agentProfile,
+            message:
+              "Run your standard manual check-in for this workspace. Summarize status, blockers, and the next useful action.",
+          },
+        },
+      },
+      "daily-brief": {
+        name: `${agent.name} daily brief`,
+        trigger: {
+          type: "schedule" as const,
+          config: { cron: "0 0 * * *", timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC" },
+        },
+        action: {
+          type: "chat" as const,
+          payload: {
+            agent: agentProfile,
+            message:
+              "Prepare a concise daily brief for your assigned workspace lane. Include priority items, recent run status, and anything that needs attention.",
+          },
+        },
+      },
+      "repo-watch": {
+        name: `${agent.name} repo event review`,
+        trigger: {
+          type: "repo_push" as const,
+          config: { repository: "", branch: "main", events: ["push", "pull_request"] },
+        },
+        action: {
+          type: "chat" as const,
+          payload: {
+            agent: agentProfile,
+            message:
+              "Review the latest repository event context and report risks, tests to run, and follow-up tasks.",
+          },
+        },
+      },
+      webhook: {
+        name: `${agent.name} webhook intake`,
+        trigger: {
+          type: "webhook" as const,
+          config: { path: `/agents/${agent.id}/webhook`, method: "POST" },
+        },
+        action: {
+          type: "chat" as const,
+          payload: {
+            agent: agentProfile,
+            message:
+              "Process the incoming webhook event for this agent and return a concise status update.",
+          },
+        },
+      },
+    }[template];
+
+    const result = await createAutomation({
+      name: templateConfig.name,
+      agentId: agent.id,
+      trigger: templateConfig.trigger,
+      action: templateConfig.action,
+    });
+
+    setIsCreatingAutomationTemplate(null);
+
+    if (!result.ok) {
+      setAutomationError(result.error || "Failed to create automation.");
+      return;
+    }
+
+    setAutomationError(null);
+    await refreshAutomations();
+  }
+
+  async function handleCreateActivityAutomation(input: {
+    agentId: string;
+    name: string;
+    task: string;
+    frequency: "once" | "daily" | "hourly";
+    date: string;
+    time: string;
+  }) {
+    if (!hasAgentRuntime) {
+      setAutomationError("Runtime is offline, so automations cannot be created yet.");
+      return { ok: false };
+    }
+
+    const agent = allAgents.find((candidate) => candidate.id === input.agentId);
+    if (!agent) {
+      setAutomationError("Choose an agent before creating the automation.");
+      return { ok: false };
+    }
+
+    const [hourText = "0", minuteText = "0"] = input.time.split(":");
+    const hour = Math.max(0, Math.min(23, Number(hourText) || 0));
+    const minute = Math.max(0, Math.min(59, Number(minuteText) || 0));
+    const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
+    const requestedRunAt = new Date(
+      `${input.date}T${input.time || "00:00"}:00`,
+    );
+    const safeRunAt =
+      requestedRunAt.getTime() <= Date.now()
+        ? new Date(Date.now() + 60_000)
+        : requestedRunAt;
+    const runAt =
+      input.frequency === "once" ? safeRunAt.toISOString() : null;
+    const cron =
+      input.frequency === "hourly"
+        ? `${minute} * * * *`
+        : `${minute} ${hour} * * *`;
+    const agentProfile = {
+      id: agent.id,
+      name: agent.name,
+      provider: agent.provider,
+      model: agent.model,
+      objective: agent.objective,
+      systemPrompt: agent.systemPrompt,
+      sandboxMode: agent.sandboxMode,
+      workspace: agent.workspace,
+      permissions: agent.permissions,
+    };
+
+    setIsCreatingActivityAutomation(true);
+    const result = await createAutomation({
+      name:
+        input.name ||
+        `${agent.name} ${input.frequency === "once" ? "scheduled task" : `${input.frequency} automation`}`,
+      agentId: agent.id,
+      trigger: {
+        type: "schedule",
+        config:
+          input.frequency === "once"
+            ? { runAt, repeat: "once", timezone }
+            : {
+                cron,
+                repeat: input.frequency,
+                time: input.time,
+                timezone,
+              },
+      },
+      action: {
+        type: "chat",
+        payload: {
+          agent: agentProfile,
+          message: input.task,
+        },
+      },
+    });
+    setIsCreatingActivityAutomation(false);
+
+    if (!result.ok) {
+      setAutomationError(result.error || "Failed to create automation.");
+      return { ok: false };
+    }
+
+    setAutomationError(null);
+    await refreshAutomations();
+    return { ok: true };
   }
 
   async function refreshRuntimeRuns(agentId?: string) {
@@ -4969,12 +2224,14 @@ function App() {
             .from("workspace_messages")
             .select("*")
             .eq("workspace_id", PERSONAL_WORKSPACE_ID)
-            .order("message_timestamp", { ascending: true }),
+            .order("message_timestamp", { ascending: false })
+            .limit(500),
           liveClient
             .from("workspace_command_runs")
             .select("*")
             .eq("workspace_id", PERSONAL_WORKSPACE_ID)
-            .order("created_at", { ascending: false }),
+            .order("created_at", { ascending: false })
+            .limit(100),
         ]);
 
       if (!active) {
@@ -5050,27 +2307,35 @@ function App() {
       );
     });
 
+    let reloadTimeout: ReturnType<typeof setTimeout>;
+    function debouncedLoadWorkspaceState() {
+      clearTimeout(reloadTimeout);
+      reloadTimeout = setTimeout(() => {
+        void loadWorkspaceState().catch(() => {});
+      }, 10000);
+    }
+
     const channel = client
       .channel("control-room-workspace-state")
       .on(
         "postgres_changes",
         { event: "*", schema: "public", table: "workspace_agents" },
-        () => void loadWorkspaceState().catch(() => {}),
+        debouncedLoadWorkspaceState,
       )
       .on(
         "postgres_changes",
         { event: "*", schema: "public", table: "workspace_delegations" },
-        () => void loadWorkspaceState().catch(() => {}),
+        debouncedLoadWorkspaceState,
       )
       .on(
         "postgres_changes",
         { event: "*", schema: "public", table: "workspace_messages" },
-        () => void loadWorkspaceState().catch(() => {}),
+        debouncedLoadWorkspaceState,
       )
       .on(
         "postgres_changes",
         { event: "*", schema: "public", table: "workspace_command_runs" },
-        () => void loadWorkspaceState().catch(() => {}),
+        debouncedLoadWorkspaceState,
       )
       .subscribe();
 
@@ -5096,45 +2361,49 @@ function App() {
       return;
     }
 
-    const rows = customAgents.map((agent) => ({
-      id: agent.id,
-      workspace_id: PERSONAL_WORKSPACE_ID,
-      name: agent.name,
-      emoji: agent.emoji,
-      subtitle: agent.subtitle,
-      type: agent.type,
-      role: agent.role,
-      accent: agent.accent,
-      status: agent.status,
-      current_activity: agent.currentActivity,
-      last_seen: agent.lastSeen,
-      tasks_completed: agent.tasksCompleted,
-      accuracy: agent.accuracy,
-      skills: agent.skills,
-      source: agent.source,
-      provider: agent.provider,
-      model: agent.model,
-      objective: agent.objective,
-      system_prompt: agent.systemPrompt,
-      specialties: agent.specialties,
-      tools: agent.tools,
-      workspace_path: agent.workspace,
-      sandbox_mode: agent.sandboxMode,
-      permissions: agent.permissions as unknown as Json,
-    }));
+    const timer = setTimeout(() => {
+      const rows = customAgents.map((agent) => ({
+        id: agent.id,
+        workspace_id: PERSONAL_WORKSPACE_ID,
+        name: agent.name,
+        emoji: agent.emoji,
+        subtitle: agent.subtitle,
+        type: agent.type,
+        role: agent.role,
+        accent: agent.accent,
+        status: agent.status,
+        current_activity: agent.currentActivity,
+        last_seen: agent.lastSeen,
+        tasks_completed: agent.tasksCompleted,
+        accuracy: agent.accuracy,
+        skills: agent.skills,
+        source: agent.source,
+        provider: agent.provider,
+        model: agent.model,
+        objective: agent.objective,
+        system_prompt: agent.systemPrompt,
+        specialties: agent.specialties,
+        tools: agent.tools,
+        workspace_path: agent.workspace,
+        sandbox_mode: agent.sandboxMode,
+        permissions: agent.permissions as unknown as Json,
+      }));
 
-    void client
-      .from("workspace_agents")
-      .upsert(rows, { onConflict: "id" })
-      .then(({ error }) => {
-        if (error) {
-          setWorkspaceSyncMode("fallback");
-          setWorkspaceSyncError(error.message);
-          return;
-        }
+      void client
+        .from("workspace_agents")
+        .upsert(rows, { onConflict: "id" })
+        .then(({ error }) => {
+          if (error) {
+            setWorkspaceSyncMode("fallback");
+            setWorkspaceSyncError(error.message);
+            return;
+          }
 
-        workspaceSyncSignatureRef.current.customAgents = nextSignature;
-      });
+          workspaceSyncSignatureRef.current.customAgents = nextSignature;
+        });
+    }, 10000);
+
+    return () => clearTimeout(timer);
   }, [customAgents, workspaceSyncMode]);
 
   useEffect(() => {
@@ -5153,33 +2422,37 @@ function App() {
       return;
     }
 
-    const rows = delegations.map((task) => ({
-      id: task.id,
-      workspace_id: PERSONAL_WORKSPACE_ID,
-      title: task.title,
-      from_agent_id: task.fromAgentId,
-      assignee_id: task.assigneeId,
-      status: task.status,
-      priority: task.priority,
-      notes: task.notes,
-      execution_mode: task.executionMode,
-      payload: task.payload,
-      cwd: task.cwd,
-      updated_at: task.updatedAt,
-    }));
+    const timer = setTimeout(() => {
+      const rows = delegations.map((task) => ({
+        id: task.id,
+        workspace_id: PERSONAL_WORKSPACE_ID,
+        title: task.title,
+        from_agent_id: task.fromAgentId,
+        assignee_id: task.assigneeId,
+        status: task.status,
+        priority: task.priority,
+        notes: task.notes,
+        execution_mode: task.executionMode,
+        payload: task.payload,
+        cwd: task.cwd,
+        updated_at: task.updatedAt,
+      }));
 
-    void client
-      .from("workspace_delegations")
-      .upsert(rows, { onConflict: "id" })
-      .then(({ error }) => {
-        if (error) {
-          setWorkspaceSyncMode("fallback");
-          setWorkspaceSyncError(error.message);
-          return;
-        }
+      void client
+        .from("workspace_delegations")
+        .upsert(rows, { onConflict: "id" })
+        .then(({ error }) => {
+          if (error) {
+            setWorkspaceSyncMode("fallback");
+            setWorkspaceSyncError(error.message);
+            return;
+          }
 
-        workspaceSyncSignatureRef.current.delegations = nextSignature;
-      });
+          workspaceSyncSignatureRef.current.delegations = nextSignature;
+        });
+    }, 10000);
+
+    return () => clearTimeout(timer);
   }, [delegations, workspaceSyncMode]);
 
   useEffect(() => {
@@ -5198,30 +2471,35 @@ function App() {
       return;
     }
 
-    const rows = Object.values(messagesByAgent)
-      .flat()
-      .map((message) => ({
-        id: message.id,
-        workspace_id: PERSONAL_WORKSPACE_ID,
-        agent_id: message.agentId,
-        role: message.role,
-        sender: message.sender,
-        content: message.content,
-        message_timestamp: message.timestamp,
-      }));
+    const timer = setTimeout(() => {
+      const trimmedMessages = trimMessagesForStorage(messagesByAgent, 30);
+      const rows = Object.values(trimmedMessages)
+        .flat()
+        .map((message) => ({
+          id: message.id,
+          workspace_id: PERSONAL_WORKSPACE_ID,
+          agent_id: message.agentId,
+          role: message.role,
+          sender: message.sender,
+          content: message.content,
+          message_timestamp: message.timestamp,
+        }));
 
-    void client
-      .from("workspace_messages")
-      .upsert(rows, { onConflict: "id" })
-      .then(({ error }) => {
-        if (error) {
-          setWorkspaceSyncMode("fallback");
-          setWorkspaceSyncError(error.message);
-          return;
-        }
+      void client
+        .from("workspace_messages")
+        .upsert(rows, { onConflict: "id" })
+        .then(({ error }) => {
+          if (error) {
+            setWorkspaceSyncMode("fallback");
+            setWorkspaceSyncError(error.message);
+            return;
+          }
 
-        workspaceSyncSignatureRef.current.messages = nextSignature;
-      });
+          workspaceSyncSignatureRef.current.messages = nextSignature;
+        });
+    }, 10000);
+
+    return () => clearTimeout(timer);
   }, [messagesByAgent, workspaceSyncMode]);
 
   useEffect(() => {
@@ -5240,40 +2518,45 @@ function App() {
       return;
     }
 
-    const rows = commandRuns.map((run) => ({
-      id: run.id,
-      workspace_id: PERSONAL_WORKSPACE_ID,
-      agent_id: run.agentId,
-      command: run.command,
-      cwd: run.cwd,
-      status: run.status,
-      phase: run.phase || run.status,
-      exit_code: run.exitCode,
-      stdout: run.stdout,
-      stderr: run.stderr,
-      timed_out: run.timedOut,
-      duration_ms: run.durationMs,
-      created_at: run.createdAt,
-      retry_count: run.retryCount ?? 0,
-      max_retries: run.maxRetries ?? 3,
-      parent_run_id: run.parentRunId ?? null,
-      retry_of_run_id: run.retryOfRunId ?? null,
-      model: run.model ?? null,
-      provider: run.provider ?? null,
-    }));
+    const timer = setTimeout(() => {
+      const trimmedRuns = trimCommandRunsForStorage(commandRuns, 50);
+      const rows = trimmedRuns.map((run) => ({
+        id: run.id,
+        workspace_id: PERSONAL_WORKSPACE_ID,
+        agent_id: run.agentId,
+        command: run.command,
+        cwd: run.cwd,
+        status: run.status,
+        phase: run.phase || run.status,
+        exit_code: run.exitCode,
+        stdout: run.stdout,
+        stderr: run.stderr,
+        timed_out: run.timedOut,
+        duration_ms: run.durationMs,
+        created_at: run.createdAt,
+        retry_count: run.retryCount ?? 0,
+        max_retries: run.maxRetries ?? 3,
+        parent_run_id: run.parentRunId ?? null,
+        retry_of_run_id: run.retryOfRunId ?? null,
+        model: run.model ?? null,
+        provider: run.provider ?? null,
+      }));
 
-    void client
-      .from("workspace_command_runs")
-      .upsert(rows, { onConflict: "id" })
-      .then(({ error }) => {
-        if (error) {
-          setWorkspaceSyncMode("fallback");
-          setWorkspaceSyncError(error.message);
-          return;
-        }
+      void client
+        .from("workspace_command_runs")
+        .upsert(rows, { onConflict: "id" })
+        .then(({ error }) => {
+          if (error) {
+            setWorkspaceSyncMode("fallback");
+            setWorkspaceSyncError(error.message);
+            return;
+          }
 
-        workspaceSyncSignatureRef.current.commandRuns = nextSignature;
-      });
+          workspaceSyncSignatureRef.current.commandRuns = nextSignature;
+        });
+    }, 10000);
+
+    return () => clearTimeout(timer);
   }, [commandRuns, workspaceSyncMode]);
 
   useEffect(() => {
@@ -5306,17 +2589,20 @@ function App() {
           .from("workspace_dispatcher_decisions")
           .select("*")
           .eq("workspace_id", PERSONAL_WORKSPACE_ID)
-          .order("created_at", { ascending: false }),
+          .order("created_at", { ascending: false })
+          .limit(100),
         liveClient
           .from("workspace_context_packages")
           .select("*")
           .eq("workspace_id", PERSONAL_WORKSPACE_ID)
-          .order("updated_at", { ascending: false }),
+          .order("updated_at", { ascending: false })
+          .limit(100),
         liveClient
           .from("workspace_task_trees")
           .select("*")
           .eq("workspace_id", PERSONAL_WORKSPACE_ID)
-          .order("updated_at", { ascending: false }),
+          .order("updated_at", { ascending: false })
+          .limit(50),
         liveClient
           .from("workspace_verifier_reviews")
           .select("*")
@@ -5436,6 +2722,14 @@ function App() {
       );
     });
 
+    let reloadTimeoutOrch: ReturnType<typeof setTimeout>;
+    function debouncedLoadOrchestrationState() {
+      clearTimeout(reloadTimeoutOrch);
+      reloadTimeoutOrch = setTimeout(() => {
+        void loadOrchestrationState().catch(() => {});
+      }, 10000);
+    }
+
     const channel = client
       .channel("control-room-orchestration-state")
       .on(
@@ -5445,27 +2739,27 @@ function App() {
           schema: "public",
           table: "workspace_dispatcher_decisions",
         },
-        () => void loadOrchestrationState().catch(() => {}),
+        debouncedLoadOrchestrationState,
       )
       .on(
         "postgres_changes",
         { event: "*", schema: "public", table: "workspace_context_packages" },
-        () => void loadOrchestrationState().catch(() => {}),
+        debouncedLoadOrchestrationState,
       )
       .on(
         "postgres_changes",
         { event: "*", schema: "public", table: "workspace_task_trees" },
-        () => void loadOrchestrationState().catch(() => {}),
+        debouncedLoadOrchestrationState,
       )
       .on(
         "postgres_changes",
         { event: "*", schema: "public", table: "workspace_verifier_reviews" },
-        () => void loadOrchestrationState().catch(() => {}),
+        debouncedLoadOrchestrationState,
       )
       .on(
         "postgres_changes",
         { event: "*", schema: "public", table: "workspace_plan_reviews" },
-        () => void loadOrchestrationState().catch(() => {}),
+        debouncedLoadOrchestrationState,
       )
       .on(
         "postgres_changes",
@@ -5474,17 +2768,17 @@ function App() {
           schema: "public",
           table: "workspace_circuit_breaker_events",
         },
-        () => void loadOrchestrationState().catch(() => {}),
+        debouncedLoadOrchestrationState,
       )
       .on(
         "postgres_changes",
         { event: "*", schema: "public", table: "workspace_knowledge_graphs" },
-        () => void loadOrchestrationState().catch(() => {}),
+        debouncedLoadOrchestrationState,
       )
       .on(
         "postgres_changes",
         { event: "*", schema: "public", table: "workspace_tool_drafts" },
-        () => void loadOrchestrationState().catch(() => {}),
+        debouncedLoadOrchestrationState,
       )
       .subscribe();
 
@@ -5762,13 +3056,17 @@ function App() {
       return;
     }
 
-    void Promise.all(operations).then((results) => {
-      const firstError = results.find((result) => result.error)?.error;
-      if (firstError) {
-        setOrchestrationSyncMode("fallback");
-        setOrchestrationSyncError(firstError.message);
-      }
-    });
+    const timer = setTimeout(() => {
+      void Promise.all(operations).then((results) => {
+        const firstError = results.find((result) => result.error)?.error;
+        if (firstError) {
+          setOrchestrationSyncMode("fallback");
+          setOrchestrationSyncError(firstError.message);
+        }
+      });
+    }, 10000);
+
+    return () => clearTimeout(timer);
   }, [
     circuitBreakerEvents,
     contextPackagesByAgent,
@@ -6056,7 +3354,19 @@ function App() {
     setMessagesByAgent((current) => ({
       ...current,
       [agentId]: (current[agentId] ?? []).map((message) =>
-        message.id === messageId ? updater(message) : message,
+        message.id === messageId
+          ? (() => {
+              const nextMessage = updater(message);
+              return message.role === "assistant" &&
+                nextMessage.role === "assistant" &&
+                message.content.length > nextMessage.content.length
+                ? {
+                    ...nextMessage,
+                    content: message.content,
+                  }
+                : nextMessage;
+            })()
+          : message,
       ),
     }));
   }
@@ -6525,10 +3835,20 @@ function App() {
       }
     }
 
+    // Final commit: the typing animation is intentionally incremental, but the
+    // chat message should always settle to the exact model output.
+    updateAgentMessage(input.agent.id, messageId, (current) => ({
+      ...current,
+      content: input.text,
+    }));
+
     updateLiveActivity(activityId, (entry) => ({
       ...entry,
       status: "completed",
-      detail: input.text.slice(-140).trim() || "Reply delivered.",
+      detail:
+        input.text.length > 700
+          ? `${input.text.slice(0, 700).trim()}...`
+          : input.text.trim() || "Reply delivered.",
       timestamp: new Date().toISOString(),
     }));
 
@@ -6578,31 +3898,182 @@ function App() {
     );
 
     const browserContextMessages: RuntimeChatMessage[] = [];
-    let hasLiveResearchContext = false;
-    if (
-      shouldUseInteractiveBrowser(
-        input.agent,
-        input.prompt,
-        Boolean(runtimeHealth.providers?.browserUse),
-      )
-    ) {
+    const hasBrowserLane = shouldUseInteractiveBrowser(
+      input.agent,
+      input.prompt,
+      Boolean(runtimeHealth.providers?.browserUse),
+    );
+    if (hasBrowserLane) {
+      const browserPromptContext = previousThread.slice(-4).map((m: any) => `${m.sender}: ${m.content}`).join('\n');
+      const browserPrompt = browserPromptContext ? `Previous context:\n${browserPromptContext}\n\nCurrent Task:\n${input.prompt}` : input.prompt;
+      
       const browserLaunch = await launchBrowserSessionForAgent({
         agent: input.agent,
-        prompt: input.prompt,
+        prompt: browserPrompt,
         focusDrawer: false,
       });
 
-      browserContextMessages.push(
-        buildBrowserSessionContextMessage(browserLaunch),
-      );
-      const liveResearchContext = await collectLiveWebResearch({
-        agent: input.agent,
-        prompt: input.prompt,
-      });
-      if (liveResearchContext) {
-        hasLiveResearchContext = true;
-        browserContextMessages.push(liveResearchContext);
+      if (browserLaunch.ok && browserLaunch.session) {
+        let sessionData = browserLaunch.session;
+        let attempts = 0;
+        while (!isBrowserUseSessionFinished(sessionData) && attempts < 45) {
+          await new Promise((r) => setTimeout(r, 4000));
+          try {
+            const pollResult = await getBrowserUseSession(sessionData.id);
+            if (pollResult.ok && pollResult.session) {
+              sessionData = pollResult.session;
+            }
+          } catch (e) {
+            // ignore network errors while polling
+          }
+          attempts++;
+        }
+
+        const output =
+          getBrowserUseSessionOutput(sessionData) ||
+          "Browser Use finished, but did not return a final output. Check the Browser activity messages/live view.";
+        browserContextMessages.push({
+          role: "system",
+          content: [
+            "Browser Use session finished.",
+            `Status: ${sessionData.status}`,
+            sessionData.totalCostUsd ? `Cost: ${sessionData.totalCostUsd}` : "",
+            "",
+            `Browser Output:\n${output}`,
+          ]
+            .filter(Boolean)
+            .join("\n"),
+        });
+      } else {
+        browserContextMessages.push(
+          buildBrowserSessionContextMessage(browserLaunch),
+        );
       }
+    }
+
+    if (
+      shouldUseGmailConnector(input.agent, input.prompt) &&
+      runtimeHealth.connectors?.gmail
+    ) {
+      const gmailResult = await fetchLatestGmailMessages(
+        getGmailRequestOptions(input.prompt),
+      );
+      const replyText = formatGmailConnectorReply(gmailResult);
+      appendAgentMessage(input.agent.id, {
+        id: `${input.agent.id}-channel-assistant-${Date.now().toString(36)}`,
+        agentId: input.agent.id,
+        role: "assistant",
+        sender: input.agent.name,
+        content: replyText,
+        timestamp: new Date().toISOString(),
+      });
+      void persistPhaseTwoMessage(
+        {
+          agentId: input.agent.id,
+          role: "assistant",
+          content: replyText,
+          sender: input.agent.name,
+        },
+        previousThread.length + 2,
+        { source: "channel_gmail_connector_result" },
+      );
+
+      return {
+        ok: gmailResult.ok,
+        text: replyText,
+      };
+    }
+
+    if (
+      shouldDraftGmailConnector(input.agent, input.prompt) &&
+      runtimeHealth.connectors?.gmail
+    ) {
+      const parsed = parseGmailMessageRequest(input.prompt);
+      if (!parsed) {
+        const replyText =
+          'Use a format like: `draft an email to name@example.com subject Project update body Here is the draft...`';
+        appendAgentMessage(input.agent.id, {
+          id: `${input.agent.id}-channel-assistant-${Date.now().toString(36)}`,
+          agentId: input.agent.id,
+          role: "assistant",
+          sender: input.agent.name,
+          content: replyText,
+          timestamp: new Date().toISOString(),
+        });
+        return { ok: false, text: replyText };
+      }
+
+      const draftResult = await handleInvokeTool(input.agent, "gmail.draft", parsed);
+      const replyText = formatGmailDraftInvocationReply(draftResult, parsed);
+      appendAgentMessage(input.agent.id, {
+        id: `${input.agent.id}-channel-assistant-${Date.now().toString(36)}`,
+        agentId: input.agent.id,
+        role: "assistant",
+        sender: input.agent.name,
+        content: replyText,
+        timestamp: new Date().toISOString(),
+      });
+      void persistPhaseTwoMessage(
+        {
+          agentId: input.agent.id,
+          role: "assistant",
+          content: replyText,
+          sender: input.agent.name,
+        },
+        previousThread.length + 2,
+        { source: "channel_gmail_draft_result" },
+      );
+
+      return {
+        ok: draftResult.ok,
+        text: replyText,
+      };
+    }
+
+    if (
+      shouldSendGmailConnector(input.agent, input.prompt) &&
+      runtimeHealth.connectors?.gmail
+    ) {
+      const parsed = parseGmailMessageRequest(input.prompt);
+      if (!parsed) {
+        const replyText =
+          'Use a format like: `send an email to name@example.com subject Project update body Here is the update...`';
+        appendAgentMessage(input.agent.id, {
+          id: `${input.agent.id}-channel-assistant-${Date.now().toString(36)}`,
+          agentId: input.agent.id,
+          role: "assistant",
+          sender: input.agent.name,
+          content: replyText,
+          timestamp: new Date().toISOString(),
+        });
+        return { ok: false, text: replyText };
+      }
+
+      const sendResult = await handleInvokeTool(input.agent, "gmail.send", parsed);
+      const replyText = formatGmailSendInvocationReply(sendResult, parsed);
+      appendAgentMessage(input.agent.id, {
+        id: `${input.agent.id}-channel-assistant-${Date.now().toString(36)}`,
+        agentId: input.agent.id,
+        role: "assistant",
+        sender: input.agent.name,
+        content: replyText,
+        timestamp: new Date().toISOString(),
+      });
+      void persistPhaseTwoMessage(
+        {
+          agentId: input.agent.id,
+          role: "assistant",
+          content: replyText,
+          sender: input.agent.name,
+        },
+        previousThread.length + 2,
+        { source: "channel_gmail_send_result" },
+      );
+
+      return {
+        ok: sendResult.ok,
+        text: replyText,
+      };
     }
 
     if (input.agent.source === "custom") {
@@ -6851,10 +4322,11 @@ function App() {
       }
 
       const result = await sendAgentRuntimeChat({
-        agent: withLiveWebContextPrompt(input.agent, {
-          hasBrowserLane: browserContextMessages.length > 0,
-          hasLiveResearch: hasLiveResearchContext,
-        }),
+        agent: withConnectorRuntimePrompt(
+          withLiveWebContextPrompt(input.agent, {
+            hasBrowserLane: browserContextMessages.length > 0,
+          }),
+        ),
         messages: [
           ...memoryContext.runtimeMessages,
           ...toRuntimeConversation(
@@ -8489,10 +5961,10 @@ function App() {
       objective: blueprint.objective.trim() || "Specialist support",
       systemPrompt: blueprint.systemPrompt.trim(),
       specialties: [],
-      tools: deriveTools(blueprint.permissions),
+      tools: deriveTools(normalizeAgentPermissions(blueprint.permissions)),
       workspace: DEFAULT_AGENT_WORKSPACE,
       sandboxMode: blueprint.sandboxMode,
-      permissions: blueprint.permissions,
+      permissions: normalizeAgentPermissions(blueprint.permissions),
       emoji: blueprint.emoji.trim() || "🤖",
     };
 
@@ -8587,12 +6059,18 @@ function App() {
     setToolApproval(null);
 
     if (result.ok && result.result?.ok) {
+      const approvalContent =
+        toolApproval.request.tool === "gmail.send"
+          ? `Sent Gmail to ${String(result.result.data?.to || toolApproval.request.parameters.to || "recipient")} with subject "${String(result.result.data?.subject || toolApproval.request.parameters.subject || "")}".`
+          : toolApproval.request.tool === "gmail.draft"
+            ? `Saved a Gmail draft to ${String(result.result.data?.to || toolApproval.request.parameters.to || "recipient")} with subject "${String(result.result.data?.subject || toolApproval.request.parameters.subject || "")}".`
+          : `Approved ${toolApproval.request.tool} execution. ${result.result?.data ? `Completed in ${result.result.data.durationMs || 0}ms.` : ""}`;
       appendAgentMessage(toolApproval.request.agentId, {
         id: `${toolApproval.request.id}-tool-approved-${Date.now().toString(36)}`,
         agentId: toolApproval.request.agentId,
         role: "system",
         sender: "Tools",
-        content: `Approved ${toolApproval.request.tool} execution. ${result.result?.data ? `Completed in ${result.result.data.durationMs || 0}ms.` : ""}`,
+        content: approvalContent,
         timestamp: new Date().toISOString(),
       });
     } else if (action === "reject") {
@@ -8631,6 +6109,8 @@ function App() {
       kind: toLiveActivityKind(
         toolName === "shell.exec"
           ? "sandbox"
+          : toolName.startsWith("browser")
+            ? "browser"
           : toolName === "code.search"
             ? "search"
             : toolName.startsWith("filesystem")
@@ -8663,7 +6143,7 @@ function App() {
         riskLevel:
           (result.approvalReasons?.length ?? 0) > 0 ? "high" : "medium",
         reasons: result.approvalReasons ?? [],
-        preview: {},
+        preview: result.preview ?? {},
         requestedAt: new Date().toISOString(),
         expiresAt: new Date(Date.now() + 10 * 60 * 1000).toISOString(),
       };
@@ -8695,6 +6175,8 @@ function App() {
       files: agentDraft.files,
       git: agentDraft.git,
       delegation: agentDraft.delegation,
+      automations: { ...agentDraft.automations },
+      connectors: { ...agentDraft.connectors },
     };
 
     if (editingAgentId) {
@@ -8788,6 +6270,8 @@ function App() {
       files: agent.permissions.files,
       git: agent.permissions.git,
       delegation: agent.permissions.delegation,
+      automations: normalizeAutomationOptions(agent.permissions.automations),
+      connectors: normalizeAgentConnectors(agent.permissions.connectors),
     });
     setIsCreateAgentOpen(true);
   }
@@ -9486,7 +6970,6 @@ function App() {
     }
 
     const browserContextMessages: RuntimeChatMessage[] = [];
-    let hasLiveResearchContext = false;
     if (shouldOpenBrowserSession) {
       setIsReplying(true);
       setReplyingAgentId(selectedAgentSnapshot.id);
@@ -9498,24 +6981,62 @@ function App() {
         timestamp: new Date().toISOString(),
       }));
 
+      const browserPromptContext = previousThread.slice(-4).map((m: any) => `${m.sender}: ${m.content}`).join('\n');
+      const browserPrompt = browserPromptContext ? `Previous context:\n${browserPromptContext}\n\nCurrent Task:\n${expandedPrompt}` : expandedPrompt;
+
       const browserLaunch = await launchBrowserSessionForAgent({
         agent: selectedAgentSnapshot,
-        prompt: expandedPrompt,
+        prompt: browserPrompt,
         focusDrawer: false,
       });
 
-      browserContextMessages.push(
-        buildBrowserSessionContextMessage(browserLaunch),
-      );
-      const liveResearchContext = await collectLiveWebResearch({
-        agent: selectedAgentSnapshot,
-        prompt: expandedPrompt,
-        activityId: thinkingActivityId,
-      });
-      if (liveResearchContext) {
-        hasLiveResearchContext = true;
-        browserContextMessages.push(liveResearchContext);
+      if (browserLaunch.ok && browserLaunch.session) {
+        updateLiveActivity(thinkingActivityId, (entry) => ({
+          ...entry,
+          detail: "Waiting for Browser Use session to complete (this may take a few minutes)...",
+        }));
+
+        let sessionData = browserLaunch.session;
+        let attempts = 0;
+        while (!isBrowserUseSessionFinished(sessionData) && attempts < 45) {
+          await new Promise((r) => setTimeout(r, 4000));
+          try {
+            const pollResult = await getBrowserUseSession(sessionData.id);
+            if (pollResult.ok && pollResult.session) {
+              sessionData = pollResult.session;
+            }
+          } catch (e) {
+            // ignore network errors while polling
+          }
+          attempts++;
+        }
+
+        const output =
+          getBrowserUseSessionOutput(sessionData) ||
+          "Browser Use finished, but did not return a final output. Check the Browser activity messages/live view.";
+        browserContextMessages.push({
+          role: "system",
+          content: [
+            "Browser Use session finished.",
+            `Status: ${sessionData.status}`,
+            sessionData.totalCostUsd ? `Cost: ${sessionData.totalCostUsd}` : "",
+            "",
+            `Browser Output:\n${output}`,
+          ]
+            .filter(Boolean)
+            .join("\n"),
+        });
+
+        updateLiveActivity(thinkingActivityId, (entry) => ({
+          ...entry,
+          detail: "Browser Use session complete, processing reply...",
+        }));
+      } else {
+        browserContextMessages.push(
+          buildBrowserSessionContextMessage(browserLaunch),
+        );
       }
+
 
       if (selectedAgentSnapshot.source === "custom") {
         updateCustomAgent(selectedAgentSnapshot.id, (agent) => ({
@@ -9541,6 +7062,98 @@ function App() {
     if (useLiveRuntime) {
       setIsReplying(true);
       setReplyingAgentId(selectedAgentSnapshot.id);
+
+      if (
+        shouldUseGmailConnector(selectedAgentSnapshot, expandedPrompt) &&
+        runtimeHealth.connectors?.gmail
+      ) {
+        updateLiveActivity(thinkingActivityId, (entry) => ({
+          ...entry,
+          status: "running",
+          detail: "Reading Gmail through the Composio connector.",
+          timestamp: new Date().toISOString(),
+        }));
+
+        const gmailResult = await fetchLatestGmailMessages(
+          getGmailRequestOptions(expandedPrompt),
+        );
+        const replyText = formatGmailConnectorReply(gmailResult);
+        await streamAssistantReply({
+          agent: selectedAgentSnapshot,
+          text: replyText,
+          previousThread,
+        });
+
+        updateTaskTree(taskTree.id, (current) => ({
+          ...current,
+          status: gmailResult.ok ? "completed" : "failed",
+          finalSummary: replyText,
+          updatedAt: new Date().toISOString(),
+          nodes: current.nodes.map((node) => ({
+            ...node,
+            status: gmailResult.ok ? "completed" : "failed",
+            updatedAt: new Date().toISOString(),
+          })),
+        }));
+        finishReplyingForAgent();
+        return;
+      }
+
+      if (
+        shouldDraftGmailConnector(selectedAgentSnapshot, expandedPrompt) &&
+        runtimeHealth.connectors?.gmail
+      ) {
+        const parsed = parseGmailMessageRequest(expandedPrompt);
+        const replyText = parsed
+          ? formatGmailDraftInvocationReply(
+              await handleInvokeTool(selectedAgentSnapshot, "gmail.draft", parsed),
+              parsed,
+            )
+          : 'Use a format like: `draft an email to name@example.com subject Project update body Here is the draft...`';
+
+        await streamAssistantReply({
+          agent: selectedAgentSnapshot,
+          text: replyText,
+          previousThread,
+        });
+
+        updateTaskTree(taskTree.id, (current) => ({
+          ...current,
+          status: parsed ? "completed" : "failed",
+          finalSummary: replyText,
+          updatedAt: new Date().toISOString(),
+        }));
+        finishReplyingForAgent();
+        return;
+      }
+
+      if (
+        shouldSendGmailConnector(selectedAgentSnapshot, expandedPrompt) &&
+        runtimeHealth.connectors?.gmail
+      ) {
+        const parsed = parseGmailMessageRequest(expandedPrompt);
+        const replyText = parsed
+          ? formatGmailSendInvocationReply(
+              await handleInvokeTool(selectedAgentSnapshot, "gmail.send", parsed),
+              parsed,
+            )
+          : 'Use a format like: `send an email to name@example.com subject Project update body Here is the update...`';
+
+        await streamAssistantReply({
+          agent: selectedAgentSnapshot,
+          text: replyText,
+          previousThread,
+        });
+
+        updateTaskTree(taskTree.id, (current) => ({
+          ...current,
+          status: parsed ? "running" : "failed",
+          finalSummary: replyText,
+          updatedAt: new Date().toISOString(),
+        }));
+        finishReplyingForAgent();
+        return;
+      }
 
       const runtimeChatAgent = withVisionRuntimeAgent(selectedAgentSnapshot, {
         hasImageInput: messageHasImageInput,
@@ -9913,10 +7526,11 @@ function App() {
       }
 
       const result = await sendAgentRuntimeChat({
-        agent: withLiveWebContextPrompt(runtimeChatAgent, {
-          hasBrowserLane: browserContextMessages.length > 0,
-          hasLiveResearch: hasLiveResearchContext,
-        }),
+        agent: withConnectorRuntimePrompt(
+          withLiveWebContextPrompt(runtimeChatAgent, {
+            hasBrowserLane: browserContextMessages.length > 0,
+          }),
+        ),
         messages: [
           ...memoryContext.runtimeMessages,
           ...toRuntimeConversation(
@@ -10511,6 +8125,14 @@ function App() {
     setActiveBrowserSessionId,
     activeBrowserSessionId,
     commandError,
+    allAgents,
+    automations,
+    automationRunsById,
+    automationError,
+    isCreatingActivityAutomation,
+    handleCreateActivityAutomation,
+    handleTriggerAutomation,
+    isTriggeringAutomationId,
   };
   const workspaceInFlightCount = useMemo(
     () => workspaceRuns.filter(runCountsAsInFlight).length,
@@ -10749,6 +8371,13 @@ function App() {
       };
     });
   }, [builtInSkillRows, selectedAgent]);
+  const editingAgent =
+    editingAgentId !== null
+      ? allAgents.find((agent) => agent.id === editingAgentId) ?? null
+      : null;
+  const editingAgentAutomations = editingAgent
+    ? automations.filter((automation) => automation.agentId === editingAgent.id)
+    : [];
   const consolidatedRuns = useMemo(() => {
     const uniqueRuns = new Map<string, CommandRun>();
 
@@ -11967,617 +9596,49 @@ function App() {
               </div>
             )}
             {workspaceView === "delegations" && (
-              <div className="mt-2 overflow-hidden rounded-3xl border border-white/8 bg-[linear-gradient(180deg,rgba(18,27,39,0.92),rgba(11,17,26,0.88))] shadow-[0_18px_48px_rgba(2,6,23,0.18)]">
-                <div className="flex items-center justify-between border-b border-white/8 px-5 py-4">
-                  <div>
-                    <p className="text-sm font-semibold text-[#eef6fb]">
-                      Delegations
-                    </p>
-                    <p className="text-[12px] text-[#8296ab]">
-                      Every handoff across the workspace, including
-                      channel-created tasks.
-                    </p>
-                  </div>
-                  <Badge variant="cyan">{delegations.length} total</Badge>
-                </div>
-                <div className="divide-y divide-white/6">
-                  {delegations.length > 0 ? (
-                    delegations.map((task) => (
-                      <div key={task.id} className="px-5 py-4">
-                        <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
-                          <div className="min-w-0">
-                            <div className="flex flex-wrap items-center gap-2">
-                              <p className="text-[14px] font-medium text-[#edf4f8]">
-                                {task.title}
-                              </p>
-                              <Badge
-                                variant={
-                                  delegationMeta[task.status].badgeVariant
-                                }
-                              >
-                                {delegationMeta[task.status].label}
-                              </Badge>
-                              <Badge
-                                variant={
-                                  priorityMeta[task.priority].badgeVariant
-                                }
-                              >
-                                {priorityMeta[task.priority].label}
-                              </Badge>
-                              <Badge
-                                variant={
-                                  executionModeMeta[task.executionMode]
-                                    .badgeVariant
-                                }
-                              >
-                                {executionModeMeta[task.executionMode].label}
-                              </Badge>
-                            </div>
-                            <p className="mt-2 text-[12px] leading-relaxed text-[#8ea0b5]">
-                              {task.notes || task.payload || "No extra notes."}
-                            </p>
-                            <p className="mt-2 text-[11px] text-[#70849a]">
-                              {allAgents.find(
-                                (agent) => agent.id === task.fromAgentId,
-                              )?.name || task.fromAgentId}{" "}
-                              →{" "}
-                              {allAgents.find(
-                                (agent) => agent.id === task.assigneeId,
-                              )?.name || task.assigneeId}
-                              {task.channelId
-                                ? ` · channel ${channels.find((channel) => channel.id === task.channelId)?.title || task.channelId}`
-                                : ""}
-                            </p>
-                          </div>
-                          <div className="flex items-center gap-2">
-                            {task.status !== "done" && (
-                              <Button
-                                variant="ghost"
-                                size="sm"
-                                onClick={() =>
-                                  void dispatchDelegationTask(task)
-                                }
-                                className="h-8 rounded-xl border border-white/8 px-3 text-[11px] text-[#c3d0dc] hover:bg-white/[0.05]"
-                              >
-                                Dispatch
-                              </Button>
-                            )}
-                            <Button
-                              variant="ghost"
-                              size="sm"
-                              onClick={() => cycleDelegationStatus(task.id)}
-                              className="h-8 rounded-xl border border-white/8 px-3 text-[11px] text-[#c3d0dc] hover:bg-white/[0.05]"
-                            >
-                              Advance
-                            </Button>
-                          </div>
-                        </div>
-                      </div>
-                    ))
-                  ) : (
-                    <div className="px-5 py-10 text-[12px] text-[#6e7f93]">
-                      No delegations yet. Create one directly or let a channel
-                      round generate them.
-                    </div>
-                  )}
-                </div>
-              </div>
+              <DelegationsView
+                delegations={delegations}
+                delegationMeta={delegationMeta}
+                priorityMeta={priorityMeta}
+                executionModeMeta={executionModeMeta}
+                allAgents={allAgents}
+                channels={channels}
+                dispatchDelegationTask={dispatchDelegationTask}
+                cycleDelegationStatus={cycleDelegationStatus}
+              />
             )}
             {workspaceView === "accounts" && (
-              <div className="space-y-4 mt-2">
-                <div className="grid grid-cols-1 gap-4 xl:grid-cols-[minmax(0,1fr)_360px]">
-                  <div className="rounded-2xl border border-[#1e252e] bg-[#161b22]/50 p-4">
-                    <DigitalTwinPanel />
-                  </div>
-                  <ApprovalQueue className="self-start" />
-                </div>
-
-                <div className="rounded-2xl border border-[#1e252e] bg-[#161b22]/50 overflow-hidden">
-                  <div className="px-4 py-3 border-b border-[#1e252e]">
-                    <p className="text-sm font-semibold text-[#e2e8f0]">
-                      Control Room Built-in
-                    </p>
-                    <p className="text-[12px] text-[#8b949e]">
-                      Nebula-style built-in capabilities, backed by the runtime
-                      and workspace features already wired here.
-                    </p>
-                  </div>
-                  <div className="divide-y divide-[#1e252e]">
-                    {builtInToolRows.map((tool) => (
-                      <div
-                        key={tool.id}
-                        className="px-4 py-3 flex items-start justify-between gap-4"
-                      >
-                        <div className="flex min-w-0 items-start gap-3">
-                          <div
-                            className={cn(
-                              "mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-md border",
-                              tool.status === "available"
-                                ? "border-[#10b981]/25 bg-[#10b981]/10 text-[#34d399]"
-                                : tool.status === "partial"
-                                  ? "border-[#f59e0b]/25 bg-[#f59e0b]/10 text-[#fbbf24]"
-                                  : "border-white/10 bg-white/[0.03] text-[#6e7681]",
-                            )}
-                          >
-                            <Check className="h-4 w-4" />
-                          </div>
-                          <div className="min-w-0">
-                            <p className="text-[15px] font-medium text-[#e2e8f0]">
-                              {tool.label}
-                            </p>
-                            <p className="mt-1 text-[12px] leading-relaxed text-[#8b949e]">
-                              {tool.description}
-                            </p>
-                          </div>
-                        </div>
-                        <Badge
-                          variant={
-                            tool.status === "available"
-                              ? "emerald"
-                              : tool.status === "partial"
-                                ? "amber"
-                                : "muted"
-                          }
-                        >
-                          {tool.status === "available"
-                            ? "Available"
-                            : tool.status === "partial"
-                              ? "Partial"
-                              : "Offline"}
-                        </Badge>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-
-                {selectedAgent ? (
-                  <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
-                    <div className="rounded-2xl border border-[#1e252e] bg-[#161b22]/50 p-4">
-                      <TrustPolicyEditor
-                        agentId={selectedAgent.id}
-                        agentName={selectedAgent.name}
-                      />
-                    </div>
-                    <div className="rounded-2xl border border-[#1e252e] bg-[#161b22]/50 p-4">
-                      <ReflectionPanel
-                        agentId={selectedAgent.id}
-                        agentName={selectedAgent.name}
-                        currentSystemPrompt={selectedAgent.systemPrompt}
-                        onApplyPatch={(patchedPrompt) => {
-                          updateCustomAgent(selectedAgent.id, (agent) => ({
-                            ...agent,
-                            systemPrompt: patchedPrompt,
-                          }));
-                        }}
-                      />
-                    </div>
-                  </div>
-                ) : null}
-
-                <div className="rounded-2xl border border-[#1e252e] bg-[#161b22]/50 overflow-hidden">
-                  <div className="px-4 py-3 border-b border-[#1e252e]">
-                    <p className="text-sm font-semibold text-[#e2e8f0]">
-                      Workspace Skill Packs
-                    </p>
-                    <p className="text-[12px] text-[#8b949e]">
-                      Reusable specialist skills for document work, browser QA,
-                      GitHub workflows, research, and deployment tasks.
-                    </p>
-                  </div>
-                  <div className="divide-y divide-[#1e252e]">
-                    {builtInSkillRows.map((skill) => {
-                      const Icon = skill.icon;
-                      return (
-                        <div
-                          key={skill.id}
-                          className="px-4 py-3 flex items-start justify-between gap-4"
-                        >
-                          <div className="flex min-w-0 items-start gap-3">
-                            <div
-                              className={cn(
-                                "mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-md border",
-                                skill.status === "available"
-                                  ? "border-[#06b6d4]/25 bg-[#06b6d4]/10 text-[#67e8f9]"
-                                  : "border-[#f59e0b]/25 bg-[#f59e0b]/10 text-[#fbbf24]",
-                              )}
-                            >
-                              <Icon className="h-4 w-4" />
-                            </div>
-                            <div className="min-w-0">
-                              <div className="flex flex-wrap items-center gap-2">
-                                <p className="text-[15px] font-medium text-[#e2e8f0]">
-                                  {skill.label}
-                                </p>
-                                {skill.requiredPermissions.map((permission) => (
-                                  <span
-                                    key={`${skill.id}-${permission}`}
-                                    className="inline-flex items-center rounded-full border border-white/8 bg-white/[0.03] px-2 py-0.5 text-[10px] uppercase tracking-[0.14em] text-[#6e7f93]"
-                                  >
-                                    {permission}
-                                  </span>
-                                ))}
-                              </div>
-                              <p className="mt-1 text-[12px] leading-relaxed text-[#8b949e]">
-                                {skill.description}
-                              </p>
-                            </div>
-                          </div>
-                          <Badge
-                            variant={
-                              skill.status === "available" ? "cyan" : "amber"
-                            }
-                          >
-                            {skill.status === "available"
-                              ? "Ready"
-                              : "Runtime Needed"}
-                          </Badge>
-                        </div>
-                      );
-                    })}
-                  </div>
-                </div>
-
-                <div className="rounded-2xl border border-[#1e252e] bg-[#161b22]/50 overflow-hidden">
-                  <div className="px-4 py-3 border-b border-[#1e252e]">
-                    <p className="text-sm font-semibold text-[#e2e8f0]">
-                      Agent Skill Surface
-                    </p>
-                    <p className="text-[12px] text-[#8b949e]">
-                      {selectedAgent
-                        ? `Skill readiness for ${selectedAgent.name}. Add matching skill tags in the agent editor to make these specialties explicit.`
-                        : "Select an agent to inspect which skill packs it can handle right now."}
-                    </p>
-                  </div>
-                  {selectedAgent ? (
-                    <div className="divide-y divide-[#1e252e]">
-                      <div className="px-4 py-3">
-                        <div className="flex flex-wrap items-center gap-2">
-                          <span className="text-lg">{selectedAgent.emoji}</span>
-                          <p className="text-[14px] font-medium text-[#e2e8f0]">
-                            {selectedAgent.name}
-                          </p>
-                          <Badge variant="muted">
-                            {selectedAgent.provider} · {selectedAgent.model}
-                          </Badge>
-                        </div>
-                        <div className="mt-3 flex flex-wrap gap-2">
-                          {selectedAgent.skills.length > 0 ? (
-                            selectedAgent.skills.map((skill) => (
-                              <span
-                                key={`${selectedAgent.id}-${skill}`}
-                                className="inline-flex items-center rounded-full border border-[#10b981]/20 bg-[#10b981]/10 px-2.5 py-1 text-[11px] text-[#86efac]"
-                              >
-                                {skill}
-                              </span>
-                            ))
-                          ) : (
-                            <span className="text-[12px] text-[#6e7681]">
-                              No explicit skill tags yet.
-                            </span>
-                          )}
-                        </div>
-                      </div>
-                      {selectedAgentSkillRows.map((skill) => {
-                        const Icon = skill.icon;
-                        return (
-                          <div
-                            key={`agent-skill-${skill.id}`}
-                            className="px-4 py-3 flex items-start justify-between gap-4"
-                          >
-                            <div className="flex min-w-0 items-start gap-3">
-                              <div
-                                className={cn(
-                                  "mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-md border",
-                                  skill.state === "enabled"
-                                    ? "border-[#10b981]/25 bg-[#10b981]/10 text-[#34d399]"
-                                    : skill.state === "ready"
-                                      ? "border-[#06b6d4]/25 bg-[#06b6d4]/10 text-[#67e8f9]"
-                                      : "border-white/10 bg-white/[0.03] text-[#6e7681]",
-                                )}
-                              >
-                                <Icon className="h-4 w-4" />
-                              </div>
-                              <div className="min-w-0">
-                                <div className="flex flex-wrap items-center gap-2">
-                                  <p className="text-[14px] font-medium text-[#e2e8f0]">
-                                    {skill.label}
-                                  </p>
-                                  {skill.matchedByName ? (
-                                    <Badge variant="emerald">Tagged</Badge>
-                                  ) : null}
-                                </div>
-                                <p className="mt-1 text-[12px] leading-relaxed text-[#8b949e]">
-                                  {skill.description}
-                                </p>
-                                <p className="mt-2 text-[11px] text-[#6e7681]">
-                                  Needs {skill.requiredPermissions.join(" + ")}{" "}
-                                  permissions
-                                </p>
-                              </div>
-                            </div>
-                            <Badge
-                              variant={
-                                skill.state === "enabled"
-                                  ? "emerald"
-                                  : skill.state === "ready"
-                                    ? "cyan"
-                                    : "muted"
-                              }
-                            >
-                              {skill.state === "enabled"
-                                ? "Enabled"
-                                : skill.state === "ready"
-                                  ? "Ready"
-                                  : "Blocked"}
-                            </Badge>
-                          </div>
-                        );
-                      })}
-                    </div>
-                  ) : (
-                    <div className="px-4 py-6 text-center text-[12px] text-[#6e7681]">
-                      Pick an agent from the sidebar and this panel will show
-                      which skill packs it can take on.
-                    </div>
-                  )}
-                </div>
-
-                <div className="rounded-2xl border border-[#1e252e] bg-[#161b22]/50 overflow-hidden">
-                  <div className="px-4 py-3 border-b border-[#1e252e]">
-                    <p className="text-sm font-semibold text-[#e2e8f0]">
-                      Provider Accounts
-                    </p>
-                    <p className="text-[12px] text-[#8b949e]">
-                      API keys and OAuth connections available to agents.
-                    </p>
-                  </div>
-                  <div className="divide-y divide-[#1e252e]">
-                    {providerPresets.map((preset) => {
-                      const isCopilot = preset.provider === "Copilot";
-                      const isGitHub = preset.provider === "GitHub";
-                      const isActive = isCopilot
-                        ? copilotAuthenticated
-                        : isGitHub
-                          ? githubModelsReady
-                          : false;
-
-                      return (
-                        <div
-                          key={`${preset.provider}-${preset.model}`}
-                          className="px-4 py-3 flex items-center justify-between gap-3"
-                        >
-                          <div className="flex items-center gap-3 min-w-0">
-                            <div
-                              className={cn(
-                                "w-8 h-8 rounded-md flex items-center justify-center text-[11px] font-bold",
-                                isActive
-                                  ? "bg-[#10b981]/15 text-[#34d399]"
-                                  : "bg-[#1e252e] text-[#6e7681]",
-                              )}
-                            >
-                              {preset.provider.slice(0, 2).toUpperCase()}
-                            </div>
-                            <div className="min-w-0">
-                              <p className="text-[13px] font-medium text-[#e2e8f0] truncate">
-                                {preset.provider}
-                              </p>
-                              <p className="text-[11px] text-[#6e7681] truncate">
-                                {presetDisplayModel(preset)}
-                              </p>
-                            </div>
-                          </div>
-                          <div className="flex items-center gap-2">
-                            <Badge variant={isActive ? "emerald" : "muted"}>
-                              {isActive ? "Connected" : "Not Configured"}
-                            </Badge>
-                          </div>
-                        </div>
-                      );
-                    })}
-                  </div>
-                </div>
-
-                <div className="rounded-2xl border border-[#1e252e] bg-[#161b22]/50 overflow-hidden">
-                  <div className="px-4 py-3 border-b border-[#1e252e]">
-                    <p className="text-sm font-semibold text-[#e2e8f0]">
-                      Agent Bindings
-                    </p>
-                    <p className="text-[12px] text-[#8b949e]">
-                      Which provider and model each agent uses.
-                    </p>
-                  </div>
-                  <div className="divide-y divide-[#1e252e]">
-                    {allAgents.filter((a) => a.source === "custom").length >
-                    0 ? (
-                      allAgents
-                        .filter((a) => a.source === "custom")
-                        .map((agent) => (
-                          <div
-                            key={agent.id}
-                            className="px-4 py-3 flex items-center justify-between gap-3"
-                          >
-                            <div className="flex items-center gap-3 min-w-0">
-                              <span className="text-lg">{agent.emoji}</span>
-                              <div className="min-w-0">
-                                <p className="text-[13px] font-medium text-[#e2e8f0] truncate">
-                                  {agent.name}
-                                </p>
-                                <p className="text-[11px] text-[#6e7681]">
-                                  {agent.provider} · {agent.model}
-                                </p>
-                              </div>
-                            </div>
-                            <div className="flex items-center gap-2">
-                              <Badge
-                                variant={
-                                  agent.sandboxMode === "workspace-write"
-                                    ? "emerald"
-                                    : "amber"
-                                }
-                              >
-                                {agent.sandboxMode}
-                              </Badge>
-                            </div>
-                          </div>
-                        ))
-                    ) : (
-                      <div className="px-4 py-6 text-center text-[12px] text-[#6e7681]">
-                        No custom agents yet. Create one to configure provider
-                        bindings.
-                      </div>
-                    )}
-                  </div>
-                </div>
-
-                <div className="rounded-2xl border border-[#1e252e] bg-[#161b22]/50 overflow-hidden">
-                  <div className="flex items-center justify-between gap-3 border-b border-[#1e252e] px-4 py-3">
-                    <div>
-                      <p className="text-sm font-semibold text-[#e2e8f0]">
-                        Event Triggers & Automations
-                      </p>
-                      <p className="text-[12px] text-[#8b949e]">
-                        Phase 2 event entrypoints for scheduled, webhook, repo,
-                        and manual workspace runs.
-                      </p>
-                    </div>
-                    <div className="flex items-center gap-2">
-                      <Badge variant="muted">{automations.length} loaded</Badge>
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        onClick={() => void refreshAutomations()}
-                        disabled={isLoadingAutomations}
-                        className="h-8 px-2.5 text-[11px]"
-                      >
-                        {isLoadingAutomations ? "Refreshing..." : "Refresh"}
-                      </Button>
-                    </div>
-                  </div>
-                  {automationError ? (
-                    <div className="border-b border-red-900/30 bg-[#3f191f]/20 px-4 py-2 text-[12px] text-[#fda4af]">
-                      {automationError}
-                    </div>
-                  ) : null}
-                  <div className="divide-y divide-[#1e252e]">
-                    {automations.length > 0 ? (
-                      automations.map((automation) => {
-                        const latestRun =
-                          automationRunsById[automation.id]?.[0] ?? null;
-                        const isTriggering =
-                          isTriggeringAutomationId === automation.id;
-
-                        return (
-                          <div
-                            key={automation.id}
-                            className="px-4 py-3 flex items-start justify-between gap-4"
-                          >
-                            <div className="min-w-0">
-                              <div className="flex flex-wrap items-center gap-2">
-                                <p className="text-[14px] font-medium text-[#e2e8f0]">
-                                  {automation.name}
-                                </p>
-                                <Badge
-                                  variant={
-                                    automation.status === "active"
-                                      ? "emerald"
-                                      : automation.status === "error"
-                                        ? "danger"
-                                        : automation.status === "paused"
-                                          ? "amber"
-                                          : "muted"
-                                  }
-                                >
-                                  {automation.status}
-                                </Badge>
-                                <Badge variant="cyan">
-                                  {getTriggerTypeLabel(automation.trigger.type)}
-                                </Badge>
-                                <Badge variant="muted">
-                                  {automation.action.type.replace(/_/g, " ")}
-                                </Badge>
-                              </div>
-                              <p className="mt-1 text-[12px] text-[#8b949e]">
-                                Agent: {automation.agentName} · Runs:{" "}
-                                {automation.runCount} · Errors:{" "}
-                                {automation.errorCount}
-                              </p>
-                              <p className="mt-2 text-[12px] leading-relaxed text-[#6e7681]">
-                                Last status:{" "}
-                                {automation.lastRunStatus || "Never run"}
-                                {automation.lastRunAt
-                                  ? ` · ${formatRelativeTime(automation.lastRunAt)}`
-                                  : ""}
-                              </p>
-                              {latestRun ? (
-                                <p className="mt-1 text-[11px] leading-relaxed text-[#6e7f93]">
-                                  Latest recorded run: {latestRun.status}
-                                  {latestRun.completedAt
-                                    ? ` · completed ${formatRelativeTime(latestRun.completedAt)}`
-                                    : ` · triggered ${formatRelativeTime(latestRun.triggeredAt)}`}
-                                  {latestRun.error
-                                    ? ` · ${latestRun.error}`
-                                    : ""}
-                                </p>
-                              ) : null}
-                            </div>
-                            <div className="flex shrink-0 items-center gap-2">
-                              <Button
-                                variant="ghost"
-                                size="sm"
-                                onClick={() =>
-                                  void handleTriggerAutomation(automation.id)
-                                }
-                                disabled={
-                                  isTriggering ||
-                                  automation.status === "disabled"
-                                }
-                                className="h-8 rounded-xl border border-white/8 px-3 text-[11px] text-[#c3d0dc] hover:bg-white/[0.05]"
-                              >
-                                {isTriggering ? "Triggering..." : "Run Now"}
-                              </Button>
-                            </div>
-                          </div>
-                        );
-                      })
-                    ) : (
-                      <div className="px-4 py-6 text-center text-[12px] text-[#6e7681]">
-                        {hasAgentRuntime
-                          ? "No automations yet. Phase 2 trigger plumbing is ready for schedules and event hooks."
-                          : "Runtime is offline, so automations are unavailable right now."}
-                      </div>
-                    )}
-                  </div>
-                </div>
-
-                <div className="rounded-2xl border border-[#1e252e] bg-[#161b22]/50 overflow-hidden">
-                  <div className="px-4 py-3 border-b border-[#1e252e]">
-                    <p className="text-sm font-semibold text-[#e2e8f0]">
-                      Health Checks
-                    </p>
-                    <p className="text-[12px] text-[#8b949e]">
-                      Live provider connectivity status.
-                    </p>
-                  </div>
-                  <div className="divide-y divide-[#1e252e]">
-                    {runtimeHealth?.providers &&
-                      Object.entries(runtimeHealth.providers).map(
-                        ([provider, available]) => (
-                          <div
-                            key={provider}
-                            className="px-4 py-3 flex items-center justify-between gap-3"
-                          >
-                            <span className="text-[13px] text-[#c9d1d9] capitalize">
-                              {provider.replace(/([A-Z])/g, " $1")}
-                            </span>
-                            <Badge variant={available ? "emerald" : "muted"}>
-                              {available ? "Available" : "Unavailable"}
-                            </Badge>
-                          </div>
-                        ),
-                      )}
-                  </div>
-                </div>
-              </div>
+              <AccountsView
+                hasAgentRuntime={hasAgentRuntime}
+                hasSupabaseConfig={hasSupabaseConfig}
+                copilotAuthenticated={copilotAuthenticated}
+                githubModelsReady={githubModelsReady}
+                showAllProviderPresets={showAllProviderPresets}
+                setShowAllProviderPresets={setShowAllProviderPresets}
+                runtimeHealth={runtimeHealth}
+                connectorAuthSessions={connectorAuthSessions}
+                connectorTokenDrafts={connectorTokenDrafts}
+                setConnectorTokenDrafts={setConnectorTokenDrafts}
+                connectorAuthBusyKey={connectorAuthBusyKey}
+                connectorAuthMessage={connectorAuthMessage}
+                automations={automations}
+                automationRunsById={automationRunsById}
+                automationError={automationError}
+                isLoadingAutomations={isLoadingAutomations}
+                isTriggeringAutomationId={isTriggeringAutomationId}
+                allAgents={allAgents}
+                selectedAgent={selectedAgent}
+                updateCustomAgent={updateCustomAgent}
+                handleStartCopilotAuth={handleStartCopilotAuth}
+                handleStartConnectorOAuth={handleStartConnectorOAuth}
+                handleSaveConnectorToken={handleSaveConnectorToken}
+                handleDisconnectConnector={handleDisconnectConnector}
+                handleEnableConnectorForAllAgents={handleEnableConnectorForAllAgents}
+                refreshConnectorAuth={refreshConnectorAuth}
+                refreshRuntimeHealth={refreshRuntimeHealth}
+                refreshAutomations={refreshAutomations}
+                handleTriggerAutomation={handleTriggerAutomation}
+              />
             )}
             {workspaceView === "activity" && (
               <div className="mt-2 space-y-4">
@@ -13454,375 +10515,24 @@ function App() {
           </div>
         )}
         {workspaceView === "observability" && (
-          <div className="space-y-4 mt-2">
-            <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-              <div className="rounded-xl border border-[#1e252e] bg-[#161b22]/50 p-3">
-                <p className="text-[11px] uppercase tracking-wider text-[#8b949e]">
-                  Total Runs
-                </p>
-                <p className="mt-1 text-2xl font-semibold text-[#e2e8f0]">
-                  {runtimeRuns.length}
-                </p>
-              </div>
-              <div className="rounded-xl border border-[#1e252e] bg-[#161b22]/50 p-3">
-                <p className="text-[11px] uppercase tracking-wider text-[#8b949e]">
-                  Completed
-                </p>
-                <p className="mt-1 text-2xl font-semibold text-[#34d399]">
-                  {runtimeRuns.filter((r) => r.status === "completed").length}
-                </p>
-              </div>
-              <div className="rounded-xl border border-[#1e252e] bg-[#161b22]/50 p-3">
-                <p className="text-[11px] uppercase tracking-wider text-[#8b949e]">
-                  Failed
-                </p>
-                <p className="mt-1 text-2xl font-semibold text-[#f87171]">
-                  {runtimeRuns.filter((r) => r.status === "failed").length}
-                </p>
-              </div>
-              <div className="rounded-xl border border-[#1e252e] bg-[#161b22]/50 p-3">
-                <p className="text-[11px] uppercase tracking-wider text-[#8b949e]">
-                  Avg Duration
-                </p>
-                <p className="mt-1 text-2xl font-semibold text-[#e2e8f0]">
-                  {runtimeRuns.length > 0
-                    ? `${Math.round(runtimeRuns.reduce((s, r) => s + (r.durationMs || 0), 0) / runtimeRuns.filter((r) => r.durationMs).length)}ms`
-                    : "—"}
-                </p>
-              </div>
-            </div>
-
-            <div className="rounded-2xl border border-[#1e252e] bg-[#161b22]/50 overflow-hidden">
-              <div className="px-4 py-3 border-b border-[#1e252e]">
-                <p className="text-sm font-semibold text-[#e2e8f0]">
-                  Run Timeline
-                </p>
-                <p className="text-[12px] text-[#8b949e]">
-                  Replayable history of all agent executions.
-                </p>
-              </div>
-              <div className="divide-y divide-[#1e252e]">
-                {runtimeRuns.slice(0, 15).map((run) => {
-                  const rsm = runStatusMeta[run.status] || runStatusMeta.failed;
-                  return (
-                    <div
-                      key={run.id}
-                      className="px-4 py-3 flex items-center justify-between gap-3"
-                    >
-                      <div className="flex items-center gap-3 min-w-0">
-                        <div
-                          className={cn(
-                            "w-2 h-2 rounded-full flex-shrink-0",
-                            run.status === "running" ||
-                              run.status === "planning"
-                              ? "bg-[#fbbf24] animate-pulse"
-                              : run.status === "completed"
-                                ? "bg-[#34d399]"
-                                : run.status === "queued"
-                                  ? "bg-[#818cf8]"
-                                  : run.status === "waiting_for_approval"
-                                    ? "bg-[#f59e0b]"
-                                    : run.status === "blocked"
-                                      ? "bg-[#fb7185]"
-                                      : "bg-[#f87171]",
-                          )}
-                        ></div>
-                        <div className="min-w-0">
-                          <p className="text-[13px] text-[#e2e8f0] truncate">
-                            {run.command}
-                          </p>
-                          <p className="text-[11px] text-[#6e7681]">
-                            {run.agentName || run.agentId} ·{" "}
-                            {formatRelativeTime(run.createdAt)}
-                            {run.model && ` · ${run.provider}/${run.model}`}
-                          </p>
-                        </div>
-                      </div>
-                      <div className="flex items-center gap-2 flex-shrink-0">
-                        {run.durationMs != null && (
-                          <span className="text-[10px] text-[#6e7681]">
-                            {run.durationMs}ms
-                          </span>
-                        )}
-                        {(run.retryCount ?? 0) > 0 && (
-                          <span className="text-[9px] text-[#818cf8]">
-                            retry {run.retryCount}
-                          </span>
-                        )}
-                        <Badge variant={rsm.badgeVariant}>{rsm.label}</Badge>
-                      </div>
-                    </div>
-                  );
-                })}
-                {runtimeRuns.length === 0 && (
-                  <div className="px-4 py-8 text-center text-[12px] text-[#6e7681]">
-                    No runs recorded yet.
-                  </div>
-                )}
-              </div>
-            </div>
-
-            <div className="rounded-2xl border border-[#1e252e] bg-[#161b22]/50 overflow-hidden">
-              <div className="px-4 py-3 border-b border-[#1e252e]">
-                <p className="text-sm font-semibold text-[#e2e8f0]">
-                  Tool Invocations
-                </p>
-                <p className="text-[12px] text-[#8b949e]">
-                  Recent tool calls across all agents.
-                </p>
-              </div>
-              <div className="divide-y divide-[#1e252e]">
-                {toolInvocationResults.slice(0, 10).map((result, i) => (
-                  <div
-                    key={i}
-                    className="px-4 py-3 flex items-center justify-between gap-3"
-                  >
-                    <div className="flex items-center gap-2">
-                      <span
-                        className={cn(
-                          "inline-flex h-5 items-center rounded border px-1.5 text-[10px] font-medium",
-                          result.ok
-                            ? "border-[#34d399]/30 bg-[#34d399]/10 text-[#6ee7b7]"
-                            : "border-[#f87171]/30 bg-[#f87171]/10 text-[#fca5a5]",
-                        )}
-                      >
-                        {result.tool}
-                      </span>
-                      {result.approvalRequired && (
-                        <span className="text-[10px] text-[#fbbf24]">
-                          approval needed
-                        </span>
-                      )}
-                    </div>
-                    <div className="flex items-center gap-2">
-                      {result.data?.durationMs != null && (
-                        <span className="text-[10px] text-[#6e7681]">
-                          {Number(result.data.durationMs)}ms
-                        </span>
-                      )}
-                      <span
-                        className={cn(
-                          "text-[10px]",
-                          result.ok ? "text-[#34d399]" : "text-[#f87171]",
-                        )}
-                      >
-                        {result.ok ? "ok" : "failed"}
-                      </span>
-                    </div>
-                  </div>
-                ))}
-                {toolInvocationResults.length === 0 && (
-                  <div className="px-4 py-6 text-center text-[12px] text-[#6e7681]">
-                    No tool invocations yet.
-                  </div>
-                )}
-              </div>
-            </div>
-
-            <div className="rounded-2xl border border-[#1e252e] bg-[#161b22]/50 overflow-hidden">
-              <div className="px-4 py-3 border-b border-[#1e252e]">
-                <p className="text-sm font-semibold text-[#e2e8f0]">
-                  Agent Tool Surface
-                </p>
-                <p className="text-[12px] text-[#8b949e]">
-                  {selectedAgent
-                    ? `Capabilities currently enabled for ${selectedAgent.name}.`
-                    : "Select an agent to inspect its enabled tools."}
-                </p>
-              </div>
-              {selectedAgent ? (
-                <div className="space-y-4 px-4 py-4">
-                  <div className="flex items-center justify-between gap-3 rounded-xl border border-white/8 bg-white/[0.03] px-3 py-3">
-                    <div className="min-w-0">
-                      <p className="text-[14px] font-medium text-[#e2e8f0]">
-                        {selectedAgent.emoji} {selectedAgent.name}
-                      </p>
-                      <p className="mt-1 text-[11px] text-[#6e7681]">
-                        {selectedAgent.provider} · {selectedAgent.model} ·{" "}
-                        {selectedAgent.role}
-                      </p>
-                    </div>
-                    <div className="flex flex-wrap items-center gap-2">
-                      <Badge variant="muted">
-                        {deriveAgentHierarchy(selectedAgent)}
-                      </Badge>
-                      <Badge
-                        variant={
-                          selectedAgent.sandboxMode === "workspace-write"
-                            ? "emerald"
-                            : selectedAgent.sandboxMode === "read-only"
-                              ? "amber"
-                              : "muted"
-                        }
-                      >
-                        {selectedAgent.sandboxMode}
-                      </Badge>
-                      <Badge
-                        variant={
-                          selectedAgent.status === "active"
-                            ? "cyan"
-                            : selectedAgent.status === "idle"
-                              ? "muted"
-                              : selectedAgent.status === "error"
-                                ? "danger"
-                                : "muted"
-                        }
-                      >
-                        {selectedAgent.status}
-                      </Badge>
-                    </div>
-                  </div>
-
-                  <div className="grid grid-cols-1 gap-3 xl:grid-cols-2">
-                    {selectedAgentCapabilityGroups.length > 0 ? (
-                      selectedAgentCapabilityGroups.map((group) => (
-                        <div
-                          key={group.category}
-                          className="rounded-xl border border-white/8 bg-white/[0.02] p-3"
-                        >
-                          <div className="mb-2 flex items-center justify-between gap-3">
-                            <p className="text-[13px] font-medium text-[#e2e8f0]">
-                              {group.label}
-                            </p>
-                            <span className="text-[10px] uppercase tracking-[0.16em] text-[#6e8398]">
-                              {group.tools.length} tools
-                            </span>
-                          </div>
-                          <div className="flex flex-wrap gap-2">
-                            {group.tools.map((tool) => (
-                              <span
-                                key={tool.name}
-                                className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-[#0d1117] px-2.5 py-1 text-[10px] text-[#c8d3de]"
-                              >
-                                <span>{tool.name}</span>
-                                {tool.requiresApproval && (
-                                  <span className="rounded-full bg-[#f59e0b]/15 px-1.5 py-0.5 text-[9px] text-[#fbbf24]">
-                                    approval
-                                  </span>
-                                )}
-                              </span>
-                            ))}
-                          </div>
-                        </div>
-                      ))
-                    ) : (
-                      <div className="rounded-xl border border-dashed border-white/10 bg-white/[0.02] px-4 py-6 text-[12px] text-[#6e7681] xl:col-span-2">
-                        This agent does not have any runtime tools enabled yet.
-                      </div>
-                    )}
-                  </div>
-                </div>
-              ) : (
-                <div className="px-4 py-6 text-center text-[12px] text-[#6e7681]">
-                  No agent selected.
-                </div>
-              )}
-            </div>
-
-            <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
-              <TaskTreePanel
-                taskTrees={selectedAgent ? taskTrees.filter((tree) => tree.rootAgentId === selectedAgent.id) : taskTrees}
-                selectedTaskTreeId={selectedTaskTree?.id ?? null}
-                onSelectTaskTree={setSelectedTaskTreeId}
-              />
-              <MemoryGraphPanel graph={selectedKnowledgeGraph} />
-            </div>
-
-            <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
-              <VerifierPanel
-                reviews={selectedVerifierReviews}
-                selectedAgentId={selectedAgent?.id ?? null}
-              />
-              <div className="rounded-2xl border border-[#1e252e] bg-[#161b22]/50 overflow-hidden">
-                <div className="border-b border-[#1e252e] px-4 py-3">
-                  <p className="text-sm font-semibold text-[#e2e8f0]">
-                    Plan Reviews & Circuit Breakers
-                  </p>
-                  <p className="text-[12px] text-[#8b949e]">
-                    Strategic review gates, dispatcher snapshots, and loop intervention signals.
-                  </p>
-                </div>
-                <div className="divide-y divide-[#1e252e]">
-                  {latestDispatcherDecision ? (
-                    <div className="px-4 py-3">
-                      <div className="flex items-center justify-between gap-3">
-                        <div>
-                          <p className="text-[13px] font-medium text-[#e2e8f0]">
-                            Latest dispatch
-                          </p>
-                          <p className="mt-1 text-[11px] text-[#6e7681]">
-                            {latestDispatcherDecision.intent} · {latestDispatcherDecision.lane} · score {latestDispatcherDecision.complexityScore}
-                          </p>
-                        </div>
-                        <Badge
-                          variant={
-                            latestDispatcherDecision.riskLevel === "danger"
-                              ? "danger"
-                              : latestDispatcherDecision.riskLevel === "caution"
-                                ? "amber"
-                                : "emerald"
-                          }
-                        >
-                          {latestDispatcherDecision.riskLevel}
-                        </Badge>
-                      </div>
-                      <p className="mt-3 text-[12px] text-[#8b949e]">
-                        {latestDispatcherDecision.reason}
-                      </p>
-                    </div>
-                  ) : null}
-                  {planReviews.slice(0, 3).map((review) => (
-                    <button
-                      key={review.id}
-                      type="button"
-                      onClick={() => setActivePlanReviewId(review.id)}
-                      className="w-full px-4 py-3 text-left transition-colors hover:bg-[#111827]/50"
-                    >
-                      <div className="flex items-center justify-between gap-3">
-                        <div>
-                          <p className="text-[13px] font-medium text-[#e2e8f0]">
-                            {review.title}
-                          </p>
-                          <p className="mt-1 text-[11px] text-[#6e7681]">
-                            {review.steps.length} steps · {review.status}
-                          </p>
-                        </div>
-                        <Badge
-                          variant={
-                            review.status === "approved"
-                              ? "emerald"
-                              : review.status === "rejected"
-                                ? "danger"
-                                : "amber"
-                          }
-                        >
-                          {review.status}
-                        </Badge>
-                      </div>
-                    </button>
-                  ))}
-                  {circuitBreakerEvents.slice(0, 3).map((event) => (
-                    <div key={event.id} className="px-4 py-3">
-                      <div className="flex items-center justify-between gap-3">
-                        <p className="text-[13px] font-medium text-[#e2e8f0]">
-                          Circuit breaker
-                        </p>
-                        <Badge variant="danger">{event.resolution}</Badge>
-                      </div>
-                      <p className="mt-2 text-[12px] leading-relaxed text-[#8b949e]">
-                        {event.reason}
-                      </p>
-                    </div>
-                  ))}
-                  {planReviews.length === 0 && circuitBreakerEvents.length === 0 && !latestDispatcherDecision ? (
-                    <div className="px-4 py-6 text-[12px] text-[#6e7681]">
-                      No orchestration reviews or intervention events yet.
-                    </div>
-                  ) : null}
-                </div>
-              </div>
-            </div>
-          </div>
+          <ObservabilityView
+            runtimeRuns={runtimeRuns}
+            toolInvocationResults={toolInvocationResults}
+            selectedAgent={selectedAgent}
+            selectedAgentCapabilityGroups={selectedAgentCapabilityGroups}
+            taskTrees={taskTrees}
+            selectedTaskTree={selectedTaskTree}
+            setSelectedTaskTreeId={setSelectedTaskTreeId}
+            selectedKnowledgeGraph={selectedKnowledgeGraph}
+            selectedVerifierReviews={selectedVerifierReviews}
+            latestDispatcherDecision={latestDispatcherDecision}
+            planReviews={planReviews}
+            setActivePlanReviewId={setActivePlanReviewId}
+            circuitBreakerEvents={circuitBreakerEvents}
+            runStatusMeta={runStatusMeta}
+            formatRelativeTime={formatRelativeTime}
+            deriveAgentHierarchy={deriveAgentHierarchy}
+          />
         )}
 
         <Dialog
@@ -14222,6 +10932,243 @@ function App() {
                     />
                   </div>
                 </div>
+
+                <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
+                  <div className="rounded-lg border border-[#d7c8b7] bg-[#fffaf2] p-3">
+                    <div className="mb-3 flex items-center justify-between gap-3">
+                      <div>
+                        <p className="text-xs font-semibold text-[#4c4035]">
+                          Automation options
+                        </p>
+                        <p className="mt-1 text-[11px] text-[#9a8978]">
+                          Pick which event lanes can wake this agent.
+                        </p>
+                      </div>
+                      <Badge variant="amber">
+                        {enabledAutomationLabels({
+                          terminal: agentDraft.terminal,
+                          browser: agentDraft.browser,
+                          files: agentDraft.files,
+                          git: agentDraft.git,
+                          delegation: agentDraft.delegation,
+                          automations: agentDraft.automations,
+                          connectors: agentDraft.connectors,
+                        }).length}{" "}
+                        enabled
+                      </Badge>
+                    </div>
+                    <div className="space-y-2">
+                      {automationOptionCatalog.map((option) => {
+                        const Icon = option.icon;
+                        return (
+                          <button
+                            key={option.key}
+                            type="button"
+                            onClick={() =>
+                              setAgentDraft((current) => ({
+                                ...current,
+                                automations: {
+                                  ...current.automations,
+                                  [option.key]: !current.automations[option.key],
+                                },
+                              }))
+                            }
+                            className={cn(
+                              "flex w-full items-start gap-3 rounded-md border px-3 py-2 text-left transition-colors",
+                              agentDraft.automations[option.key]
+                                ? "border-[#c96437]/40 bg-[#c96437]/10"
+                                : "border-[#e0d2c0] bg-[#fbf7ef] hover:bg-[#f7efe3]",
+                            )}
+                          >
+                            <Icon className="mt-0.5 h-4 w-4 shrink-0 text-[#c96437]" />
+                            <span className="min-w-0">
+                              <span className="block text-[12px] font-medium text-[#2f261f]">
+                                {option.label}
+                              </span>
+                              <span className="mt-0.5 block text-[11px] leading-relaxed text-[#8f7b66]">
+                                {option.description}
+                              </span>
+                            </span>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+
+                  <div className="rounded-lg border border-[#d7c8b7] bg-[#fffaf2] p-3">
+                    <div className="mb-3 flex items-center justify-between gap-3">
+                      <div>
+                        <p className="text-xs font-semibold text-[#4c4035]">
+                          Connectors
+                        </p>
+                        <p className="mt-1 text-[11px] text-[#9a8978]">
+                          Bind services this agent can use through runtime tools.
+                        </p>
+                      </div>
+                      <Badge variant="amber">
+                        {enabledConnectorLabels({
+                          terminal: agentDraft.terminal,
+                          browser: agentDraft.browser,
+                          files: agentDraft.files,
+                          git: agentDraft.git,
+                          delegation: agentDraft.delegation,
+                          automations: agentDraft.automations,
+                          connectors: agentDraft.connectors,
+                        }).length}{" "}
+                        linked
+                      </Badge>
+                    </div>
+                    <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+                      {connectorCatalog.map((connector) => {
+                        const Icon = connector.icon;
+                        const enabled = agentDraft.connectors[connector.key];
+                        const status = connectorStatusLabel(connector.key, {
+                          hasAgentRuntime,
+                          hasSupabaseConfig,
+                          runtimeHealth,
+                          copilotAuthenticated,
+                        });
+                        return (
+                          <button
+                            key={connector.key}
+                            type="button"
+                            onClick={() =>
+                              setAgentDraft((current) => ({
+                                ...current,
+                                connectors: {
+                                  ...current.connectors,
+                                  [connector.key]: !current.connectors[connector.key],
+                                },
+                                automations: connector.automationKey
+                                  ? {
+                                      ...current.automations,
+                                      [connector.automationKey]:
+                                        !current.connectors[connector.key] ||
+                                        current.automations[
+                                          connector.automationKey
+                                        ],
+                                    }
+                                  : current.automations,
+                              }))
+                            }
+                            className={cn(
+                              "min-h-[94px] rounded-md border p-3 text-left transition-colors",
+                              enabled
+                                ? "border-[#c96437]/40 bg-[#c96437]/10"
+                                : "border-[#e0d2c0] bg-[#fbf7ef] hover:bg-[#f7efe3]",
+                            )}
+                          >
+                            <span className="mb-2 flex items-center justify-between gap-2">
+                              <span className="flex min-w-0 items-center gap-2">
+                                <Icon className="h-4 w-4 shrink-0 text-[#c96437]" />
+                                <span className="truncate text-[12px] font-medium text-[#2f261f]">
+                                  {connector.label}
+                                </span>
+                              </span>
+                              <Badge
+                                variant={
+                                  connectorStatusVariant(status) as
+                                    | "emerald"
+                                    | "amber"
+                                    | "muted"
+                                }
+                              >
+                                {status}
+                              </Badge>
+                            </span>
+                            <span className="block text-[11px] leading-relaxed text-[#8f7b66]">
+                              {connector.description}
+                            </span>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                </div>
+
+                {editingAgent ? (
+                  <div className="rounded-lg border border-[#d7c8b7] bg-[#fffaf2] p-3">
+                    <div className="mb-3 flex flex-wrap items-start justify-between gap-3">
+                      <div>
+                        <p className="text-xs font-semibold text-[#4c4035]">
+                          Saved automations for {editingAgent.name}
+                        </p>
+                        <p className="mt-1 text-[11px] text-[#9a8978]">
+                          Create starter triggers now; they appear in Activity
+                          and can be run manually.
+                        </p>
+                      </div>
+                      <Badge variant="muted">
+                        {editingAgentAutomations.length} saved
+                      </Badge>
+                    </div>
+                    <div className="flex flex-wrap gap-2">
+                      {(
+                        [
+                          ["manual-check", "Manual check", PlayCircle],
+                          ["daily-brief", "Daily brief", CalendarDays],
+                          ["repo-watch", "Repo watch", Github],
+                          ["webhook", "Webhook intake", Link2],
+                        ] as const
+                      ).map(([template, label, Icon]) => {
+                        const templateKey = `${editingAgent.id}-${template}`;
+                        return (
+                          <Button
+                            key={template}
+                            type="button"
+                            variant="ghost"
+                            size="sm"
+                            className="h-8 border-[#e0d2c0] bg-[#fbf7ef] px-2.5 text-[11px] text-[#7d6b5a] hover:bg-[#f7efe3] hover:text-[#2f261f]"
+                            disabled={
+                              isCreatingAutomationTemplate === templateKey
+                            }
+                            onClick={() =>
+                              void handleCreateAgentAutomationTemplate(
+                                editingAgent,
+                                template,
+                              )
+                            }
+                          >
+                            <Icon className="mr-1.5 h-3.5 w-3.5" />
+                            {isCreatingAutomationTemplate === templateKey
+                              ? "Creating..."
+                              : label}
+                          </Button>
+                        );
+                      })}
+                    </div>
+                    {editingAgentAutomations.length > 0 ? (
+                      <div className="mt-3 grid grid-cols-1 gap-2 md:grid-cols-2">
+                        {editingAgentAutomations.slice(0, 4).map((automation) => (
+                          <div
+                            key={automation.id}
+                            className="rounded-md border border-[#e0d2c0] bg-[#fbf7ef] px-3 py-2"
+                          >
+                            <div className="flex items-center justify-between gap-2">
+                              <span className="truncate text-[12px] font-medium text-[#2f261f]">
+                                {automation.name}
+                              </span>
+                              <Badge
+                                variant={
+                                  automation.status === "active"
+                                    ? "emerald"
+                                    : "muted"
+                                }
+                              >
+                                {automation.status}
+                              </Badge>
+                            </div>
+                            <p className="mt-1 text-[11px] text-[#8f7b66]">
+                              {getTriggerTypeLabel(automation.trigger.type)} ·{" "}
+                              {automation.action.type.replace(/_/g, " ")} ·{" "}
+                              {automation.runCount} runs
+                            </p>
+                          </div>
+                        ))}
+                      </div>
+                    ) : null}
+                  </div>
+                ) : null}
 
                 <div>
                   <p className="mb-2 text-xs text-[#8f7b66]">
@@ -14798,6 +11745,17 @@ function App() {
                     <code className="text-[13px] text-[#79c0ff] break-all">
                       {toolApproval.request.preview.url}
                     </code>
+                  </div>
+                )}
+
+                {toolApproval.request.preview?.summary && (
+                  <div className="rounded-lg border border-[#30363d] bg-[#0b0f15] overflow-hidden">
+                    <div className="px-3 py-2 border-b border-[#1e252e] text-[11px] text-[#8b949e]">
+                      Action Preview
+                    </div>
+                    <pre className="p-3 font-mono text-[12px] whitespace-pre-wrap overflow-auto max-h-[220px]">
+                      {toolApproval.request.preview.summary}
+                    </pre>
                   </div>
                 )}
 
