@@ -13,6 +13,7 @@ const rootDir = resolve(__dirname, "..");
 
 loadEnv({ path: resolve(rootDir, ".env.runtime.local"), quiet: true });
 loadEnv({ path: resolve(rootDir, ".env.local"), override: false, quiet: true });
+loadEnv({ path: resolve(rootDir, ".env.agent.local"), override: false, quiet: true });
 
 const host = process.env.CONTROL_ROOM_RUNTIME_HOST || "127.0.0.1";
 const port = Number(process.env.CONTROL_ROOM_RUNTIME_PORT || 8787);
@@ -22,6 +23,10 @@ const oauthPollBaseIntervalSeconds = Number(process.env.CONTROL_ROOM_RUNTIME_OAU
 const maxRetainedCommandRuns = Number(process.env.CONTROL_ROOM_RUNTIME_MAX_RETAINED_RUNS || 60);
 const browserUseApiKey = process.env.BROWSER_USE_API_KEY?.trim() || "";
 const browserUseBaseUrl = (process.env.BROWSER_USE_BASE_URL?.trim() || "https://api.browser-use.com/api/v3").replace(/\/$/, "");
+const browserUseModel = process.env.BROWSER_USE_MODEL?.trim() || "bu-max";
+const browserUseMaxCostUsd = process.env.BROWSER_USE_MAX_COST_USD?.trim() || "1.00";
+const composioBaseUrl = (process.env.COMPOSIO_BASE_URL?.trim() || "https://backend.composio.dev/api/v3.1").replace(/\/$/, "");
+const composioUserId = process.env.COMPOSIO_USER_ID?.trim() || "vansh";
 
 // Offline-Safe Fetch Interceptor: Prevents ENOTFOUND crashes when running natively offline
 const originalFetch = globalThis.fetch;
@@ -49,6 +54,7 @@ const runtimeState = {
   githubOauthUpdatedAt: "",
   copilotApiToken: "",
   copilotApiTokenExpiresAt: 0,
+  connectorSessions: {},
   commandRuns: [],
   browserUseSessions: [],
 };
@@ -339,6 +345,9 @@ function emitRuntimeEvent(eventType, runId, agentId, agentName, data) {
 }
 
 const copilotSessionPath = resolve(rootDir, ".copilot-session.json");
+const connectorSessionsPath = resolve(rootDir, ".connector-sessions.json");
+const automationsStorePath = resolve(rootDir, ".automations-store.json");
+const pendingConnectorOAuth = new Map();
 
 function loadCopilotSession() {
   try {
@@ -366,6 +375,101 @@ function saveCopilotSession() {
   } catch (err) {
     log(`Warning: could not save Copilot session: ${err.message}`);
   }
+}
+
+function loadConnectorSessions() {
+  try {
+    const data = JSON.parse(readFileSync(connectorSessionsPath, "utf-8"));
+    if (data && typeof data === "object") {
+      runtimeState.connectorSessions = data;
+      log("Restored connector OAuth/token sessions from .connector-sessions.json");
+    }
+  } catch {
+    // No saved connector sessions yet.
+  }
+}
+
+function saveConnectorSessions() {
+  try {
+    writeFileSync(
+      connectorSessionsPath,
+      JSON.stringify(runtimeState.connectorSessions, null, 2),
+      "utf-8",
+    );
+  } catch (err) {
+    log(`Warning: could not save connector sessions: ${err.message}`);
+  }
+}
+
+function loadAutomationState() {
+  try {
+    const data = JSON.parse(readFileSync(automationsStorePath, "utf-8"));
+    const automations = Array.isArray(data?.automations) ? data.automations : [];
+    const runsByAutomation = data?.runsByAutomation || {};
+    automationsStore.clear();
+    automationRunsStore.clear();
+    for (const automation of automations) {
+      if (automation?.id) {
+        automationsStore.set(automation.id, automation);
+      }
+    }
+    for (const [automationId, runs] of Object.entries(runsByAutomation)) {
+      if (Array.isArray(runs)) {
+        automationRunsStore.set(automationId, runs);
+      }
+    }
+    if (automations.length > 0) {
+      log(`Restored ${automations.length} automation(s) from .automations-store.json`);
+    }
+  } catch {
+    // No saved automations yet.
+  }
+}
+
+function saveAutomationState() {
+  try {
+    writeFileSync(
+      automationsStorePath,
+      JSON.stringify(
+        {
+          automations: Array.from(automationsStore.values()),
+          runsByAutomation: Object.fromEntries(automationRunsStore.entries()),
+        },
+        null,
+        2,
+      ),
+      "utf-8",
+    );
+  } catch (err) {
+    log(`Warning: could not save automations: ${err.message}`);
+  }
+}
+
+function publicConnectorSessions() {
+  return Object.fromEntries(
+    Object.entries(runtimeState.connectorSessions || {}).map(([key, value]) => [
+      key,
+      {
+        provider: key,
+        connected: Boolean(
+          value?.accessToken ||
+            value?.apiKey ||
+            (value?.authType === "composio" && value?.composioConnectedAccountId),
+        ),
+        authType: value?.authType || "token",
+        scopes: value?.scopes || [],
+        accountLabel:
+          value?.accountLabel ||
+          value?.teamName ||
+          value?.workspaceName ||
+          value?.composioToolkit ||
+          "",
+        keyPreview: value?.keyPreview || "",
+        updatedAt: value?.updatedAt || "",
+        expiresAt: value?.expiresAt || null,
+      },
+    ]),
+  );
 }
 
 const blockedCommandPatterns = [
@@ -533,8 +637,410 @@ function providerAvailability() {
     openrouter: Boolean(process.env.OPENROUTER_API_KEY),
     gemini: Boolean(process.env.GEMINI_API_KEY),
     groq: Boolean(process.env.GROQ_API_KEY),
+    nvidia: Boolean(process.env.NVIDIA_API_KEY),
+    modal: Boolean(process.env.MODAL_API_KEY),
     githubModels: Boolean(resolveGitHubModelsToken().token),
     browserUse: Boolean(browserUseApiKey),
+  };
+}
+
+function connectorAvailability() {
+  const sessions = runtimeState.connectorSessions || {};
+  const composioConnected = (provider) =>
+    Boolean(
+      sessions[provider]?.authType === "composio" &&
+        sessions[provider]?.composioConnectedAccountId,
+    );
+  const hasGitHubToken = Boolean(
+    process.env.GITHUB_TOKEN?.trim() ||
+      process.env.GITHUB_MODELS_TOKEN?.trim() ||
+      runtimeState.githubOauthToken,
+  );
+  const hasGoogleOAuth = Boolean(
+    sessions.google?.accessToken ||
+    process.env.GOOGLE_ACCESS_TOKEN?.trim() ||
+      process.env.GMAIL_ACCESS_TOKEN?.trim() ||
+      (process.env.GOOGLE_CLIENT_ID?.trim() &&
+        process.env.GOOGLE_CLIENT_SECRET?.trim()),
+  );
+
+  return {
+    localBridge: true,
+    browser: Boolean(browserUseApiKey),
+    github: hasGitHubToken || composioConnected("github"),
+    gmail: hasGoogleOAuth || composioConnected("gmail"),
+    googleDrive: hasGoogleOAuth || composioConnected("googleDrive"),
+    googleCalendar: hasGoogleOAuth || composioConnected("googleCalendar"),
+    slack: Boolean(composioConnected("slack") || sessions.slack?.accessToken || process.env.SLACK_BOT_TOKEN?.trim()),
+    notion: Boolean(composioConnected("notion") || sessions.notion?.accessToken || process.env.NOTION_API_KEY?.trim()),
+    vercel: Boolean(composioConnected("vercel") || sessions.vercel?.apiKey || process.env.VERCEL_TOKEN?.trim()),
+    supabase: Boolean(
+      sessions.supabase?.apiKey ||
+      process.env.VITE_SUPABASE_URL?.trim() ||
+        process.env.SUPABASE_URL?.trim(),
+    ),
+    webhook: true,
+    composio: Boolean(getComposioApiKey()),
+  };
+}
+
+const composioConnectorToolkits = {
+  github: "GITHUB",
+  gmail: "GMAIL",
+  googleDrive: "GOOGLEDRIVE",
+  googleCalendar: "GOOGLECALENDAR",
+  slack: "SLACK",
+  notion: "NOTION",
+  vercel: "VERCEL",
+};
+
+function getComposioApiKey() {
+  return (
+    process.env.COMPOSIO_API_KEY?.trim() ||
+    runtimeState.connectorSessions?.composio?.apiKey ||
+    ""
+  );
+}
+
+function isComposioConnector(provider) {
+  return Boolean(composioConnectorToolkits[provider]);
+}
+
+async function composioRequest(path, options = {}) {
+  const apiKey = getComposioApiKey();
+  if (!apiKey) {
+    throw new Error("COMPOSIO_API_KEY is missing. Add it to .env.runtime.local or save it in Connector Hub.");
+  }
+
+  const response = await fetch(`${composioBaseUrl}${path}`, {
+    ...options,
+    headers: {
+      "Content-Type": "application/json",
+      "x-api-key": apiKey,
+      ...(options.headers || {}),
+    },
+  });
+  const text = await response.text();
+  let payload = {};
+  try {
+    payload = text ? JSON.parse(text) : {};
+  } catch {
+    payload = { raw: text };
+  }
+  if (!response.ok) {
+    const message =
+      payload?.error?.message ||
+      payload?.message ||
+      payload?.error ||
+      response.statusText ||
+      "Composio request failed.";
+    throw new Error(message);
+  }
+  return payload;
+}
+
+async function ensureComposioAuthConfig(provider) {
+  const toolkit = composioConnectorToolkits[provider];
+  if (!toolkit) {
+    throw new Error(`${provider} is not mapped to a Composio toolkit yet.`);
+  }
+
+  const existing = runtimeState.connectorSessions?.[provider]?.composioAuthConfigId;
+  if (existing) {
+    return existing;
+  }
+
+  try {
+    const listed = await composioRequest(
+      `/auth_configs?toolkit_slug=${encodeURIComponent(toolkit)}&is_composio_managed=true&limit=10`,
+      { method: "GET" },
+    );
+    const found = (listed.items || []).find(
+      (item) =>
+        item?.id &&
+        item?.toolkit?.slug?.toUpperCase?.() === toolkit &&
+        item?.status !== "DISABLED",
+    );
+    if (found?.id) {
+      runtimeState.connectorSessions[provider] = {
+        ...(runtimeState.connectorSessions[provider] || {}),
+        provider,
+        authType: "composio",
+        composioToolkit: toolkit,
+        composioAuthConfigId: found.id,
+        accountLabel: `${toolkit} via Composio`,
+        updatedAt: new Date().toISOString(),
+      };
+      saveConnectorSessions();
+      return found.id;
+    }
+  } catch (err) {
+    log(`Composio auth config lookup for ${provider} will create a new config: ${err.message}`);
+  }
+
+  const created = await composioRequest("/auth_configs", {
+    method: "POST",
+    body: JSON.stringify({
+      toolkit: { slug: toolkit },
+      auth_config: {
+        type: "use_composio_managed_auth",
+        credentials: {},
+        restrict_to_following_tools: [],
+      },
+    }),
+  });
+  const authConfigId = created?.auth_config?.id || created?.id;
+  if (!authConfigId) {
+    throw new Error(`Composio did not return an auth config id for ${toolkit}.`);
+  }
+
+  runtimeState.connectorSessions[provider] = {
+    ...(runtimeState.connectorSessions[provider] || {}),
+    provider,
+    authType: "composio",
+    composioToolkit: toolkit,
+    composioAuthConfigId: authConfigId,
+    accountLabel: `${toolkit} via Composio`,
+    updatedAt: new Date().toISOString(),
+  };
+  saveConnectorSessions();
+  return authConfigId;
+}
+
+function composioCallbackUrl(provider) {
+  return `http://${host}:${port}/v1/connectors/composio/callback?provider=${encodeURIComponent(provider)}`;
+}
+
+async function startComposioConnector(provider) {
+  const toolkit = composioConnectorToolkits[provider];
+  const authConfigId = await ensureComposioAuthConfig(provider);
+  const alias = `control-room-${provider}-${composioUserId}`.replace(/[^a-zA-Z0-9_-]/g, "-");
+  const link = await composioRequest("/connected_accounts/link", {
+    method: "POST",
+    body: JSON.stringify({
+      auth_config_id: authConfigId,
+      user_id: composioUserId,
+      alias,
+      callback_url: composioCallbackUrl(provider),
+    }),
+  });
+
+  runtimeState.connectorSessions[provider] = {
+    ...(runtimeState.connectorSessions[provider] || {}),
+    provider,
+    authType: "composio",
+    composioToolkit: toolkit,
+    composioAuthConfigId: authConfigId,
+    composioConnectedAccountId: link.connected_account_id || runtimeState.connectorSessions[provider]?.composioConnectedAccountId || "",
+    accountLabel: `${toolkit} via Composio`,
+    updatedAt: new Date().toISOString(),
+    expiresAt: link.expires_at || null,
+  };
+  saveConnectorSessions();
+
+  return {
+    ok: true,
+    provider,
+    authUrl: link.redirect_url,
+    redirectUri: composioCallbackUrl(provider),
+    scopes: [],
+    connectorProvider: "composio",
+  };
+}
+
+async function refreshComposioConnector(provider, connectedAccountId = "") {
+  const session = runtimeState.connectorSessions[provider] || {};
+  const accountId = connectedAccountId || session.composioConnectedAccountId;
+  if (!accountId) {
+    return connectorAuthStatus(provider);
+  }
+
+  const account = await composioRequest(`/connected_accounts/${encodeURIComponent(accountId)}`, {
+    method: "GET",
+  });
+  runtimeState.connectorSessions[provider] = {
+    ...session,
+    provider,
+    authType: "composio",
+    composioToolkit: account?.toolkit?.slug?.toUpperCase?.() || session.composioToolkit || composioConnectorToolkits[provider],
+    composioAuthConfigId: account?.auth_config?.id || session.composioAuthConfigId || "",
+    composioConnectedAccountId: account?.id || accountId,
+    composioStatus: account?.status || "",
+    accountLabel: account?.alias || account?.name || `${provider} via Composio`,
+    updatedAt: new Date().toISOString(),
+    expiresAt: session.expiresAt || null,
+  };
+  saveConnectorSessions();
+  return connectorAuthStatus(provider);
+}
+
+async function composioProxy(connectedAccountId, endpoint, method = "GET", body = undefined) {
+  if (!connectedAccountId) {
+    throw new Error("No Composio connected account id is saved for this connector.");
+  }
+  return await composioRequest("/tools/execute/proxy", {
+    method: "POST",
+    body: JSON.stringify({
+      connected_account_id: connectedAccountId,
+      endpoint,
+      method,
+      ...(body === undefined ? {} : { body }),
+    }),
+  });
+}
+
+function extractHeader(headers, name) {
+  const match = (headers || []).find(
+    (header) => `${header?.name || ""}`.toLowerCase() === name.toLowerCase(),
+  );
+  return match?.value || "";
+}
+
+function encodeBase64Url(value) {
+  return Buffer.from(value, "utf-8")
+    .toString("base64")
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=+$/g, "");
+}
+
+function buildGmailRfc822(parameters = {}) {
+  const to = `${parameters.to || ""}`.trim();
+  const subject = `${parameters.subject || ""}`.trim();
+  const body = `${parameters.body || ""}`;
+  const cc = `${parameters.cc || ""}`.trim();
+  const bcc = `${parameters.bcc || ""}`.trim();
+
+  if (!to) {
+    throw new Error("A recipient email is required.");
+  }
+  if (!subject) {
+    throw new Error("An email subject is required.");
+  }
+  if (!body.trim()) {
+    throw new Error("An email body is required.");
+  }
+
+  return {
+    to,
+    subject,
+    raw: [
+      `To: ${to}`,
+      cc ? `Cc: ${cc}` : "",
+      bcc ? `Bcc: ${bcc}` : "",
+      `Subject: ${subject}`,
+      "Content-Type: text/plain; charset=UTF-8",
+      "MIME-Version: 1.0",
+      "",
+      body,
+    ]
+      .filter(Boolean)
+      .join("\r\n"),
+  };
+}
+
+async function fetchLatestGmailMessages(limit = 5, query = "") {
+  const session = runtimeState.connectorSessions.gmail;
+  if (!session?.composioConnectedAccountId) {
+    throw new Error("Gmail is not connected through Composio yet.");
+  }
+
+  const maxResults = Math.min(Math.max(Number(limit) || 5, 1), 10);
+  const params = new URLSearchParams({ maxResults: `${maxResults}` });
+  if (query.trim()) {
+    params.set("q", query.trim());
+  }
+
+  const listPayload = await composioProxy(
+    session.composioConnectedAccountId,
+    `/gmail/v1/users/me/messages?${params.toString()}`,
+  );
+  const messages = Array.isArray(listPayload?.data?.messages)
+    ? listPayload.data.messages
+    : [];
+
+  const detailedMessages = [];
+  for (const message of messages) {
+    if (!message?.id) continue;
+    const detail = await composioProxy(
+      session.composioConnectedAccountId,
+      `/gmail/v1/users/me/messages/${encodeURIComponent(message.id)}?format=metadata&metadataHeaders=From&metadataHeaders=Subject&metadataHeaders=Date`,
+    );
+    const payload = detail?.data || {};
+    const headers = payload?.payload?.headers || [];
+    detailedMessages.push({
+      id: payload.id || message.id,
+      threadId: payload.threadId || message.threadId || "",
+      from: extractHeader(headers, "From"),
+      subject: extractHeader(headers, "Subject") || "(no subject)",
+      date: extractHeader(headers, "Date"),
+      labels: payload.labelIds || [],
+      snippet: payload.snippet || "",
+    });
+  }
+
+  return {
+    ok: true,
+    provider: "gmail",
+    accountLabel: session.accountLabel || "Gmail via Composio",
+    count: detailedMessages.length,
+    messages: detailedMessages,
+  };
+}
+
+async function sendGmailMessage(parameters = {}) {
+  const session = runtimeState.connectorSessions.gmail;
+  if (!session?.composioConnectedAccountId) {
+    throw new Error("Gmail is not connected through Composio yet.");
+  }
+  const { to, subject, raw } = buildGmailRfc822(parameters);
+
+  const payload = await composioProxy(
+    session.composioConnectedAccountId,
+    "/gmail/v1/users/me/messages/send",
+    "POST",
+    { raw: encodeBase64Url(raw) },
+  );
+
+  return {
+    ok: true,
+    tool: "gmail.send",
+    data: {
+      id: payload?.data?.id || "",
+      threadId: payload?.data?.threadId || "",
+      labelIds: payload?.data?.labelIds || [],
+      to,
+      subject,
+      accountLabel: session.accountLabel || "Gmail via Composio",
+    },
+  };
+}
+
+async function draftGmailMessage(parameters = {}) {
+  const session = runtimeState.connectorSessions.gmail;
+  if (!session?.composioConnectedAccountId) {
+    throw new Error("Gmail is not connected through Composio yet.");
+  }
+  const { to, subject, raw } = buildGmailRfc822(parameters);
+
+  const payload = await composioProxy(
+    session.composioConnectedAccountId,
+    "/gmail/v1/users/me/drafts",
+    "POST",
+    { message: { raw: encodeBase64Url(raw) } },
+  );
+
+  return {
+    ok: true,
+    tool: "gmail.draft",
+    data: {
+      id: payload?.data?.id || "",
+      messageId: payload?.data?.message?.id || "",
+      threadId: payload?.data?.message?.threadId || "",
+      to,
+      subject,
+      accountLabel: session.accountLabel || "Gmail via Composio",
+    },
   };
 }
 
@@ -542,7 +1048,167 @@ function browserUseStatus() {
   return {
     configured: Boolean(browserUseApiKey),
     baseUrl: browserUseBaseUrl,
+    model: browserUseModel,
+    maxCostUsd: browserUseMaxCostUsd,
   };
+}
+
+const googleConnectorScopes = [
+  "https://www.googleapis.com/auth/gmail.readonly",
+  "https://www.googleapis.com/auth/gmail.compose",
+  "https://www.googleapis.com/auth/gmail.send",
+  "https://www.googleapis.com/auth/drive.readonly",
+  "https://www.googleapis.com/auth/drive.file",
+  "https://www.googleapis.com/auth/calendar.readonly",
+  "https://www.googleapis.com/auth/calendar.events",
+];
+
+function getConnectorOAuthConfig(provider) {
+  if (provider === "google") {
+    return {
+      provider,
+      clientId: process.env.GOOGLE_CLIENT_ID?.trim() || "",
+      clientSecret: process.env.GOOGLE_CLIENT_SECRET?.trim() || "",
+      authUrl: "https://accounts.google.com/o/oauth2/v2/auth",
+      tokenUrl: "https://oauth2.googleapis.com/token",
+      scopes: googleConnectorScopes,
+    };
+  }
+
+  if (provider === "slack") {
+    return {
+      provider,
+      clientId: process.env.SLACK_CLIENT_ID?.trim() || "",
+      clientSecret: process.env.SLACK_CLIENT_SECRET?.trim() || "",
+      authUrl: "https://slack.com/oauth/v2/authorize",
+      tokenUrl: "https://slack.com/api/oauth.v2.access",
+      scopes: ["channels:read", "chat:write", "users:read", "files:read"],
+    };
+  }
+
+  if (provider === "notion") {
+    return {
+      provider,
+      clientId: process.env.NOTION_CLIENT_ID?.trim() || "",
+      clientSecret: process.env.NOTION_CLIENT_SECRET?.trim() || "",
+      authUrl: "https://api.notion.com/v1/oauth/authorize",
+      tokenUrl: "https://api.notion.com/v1/oauth/token",
+      scopes: [],
+    };
+  }
+
+  return null;
+}
+
+function connectorRedirectUri(provider) {
+  return `http://${host}:${port}/v1/connectors/${encodeURIComponent(provider)}/callback`;
+}
+
+function connectorAuthStatus(provider) {
+  const config = getConnectorOAuthConfig(provider);
+  const session = runtimeState.connectorSessions?.[provider];
+  const composioReady = isComposioConnector(provider) && Boolean(getComposioApiKey());
+  return {
+    ok: true,
+    provider,
+    configured: provider === "github" ? true : Boolean(composioReady || (config?.clientId && config?.clientSecret)),
+    connected: Boolean(session?.accessToken || session?.apiKey || session?.composioConnectedAccountId),
+    session: session
+      ? {
+          authType: session.authType,
+          scopes: session.scopes || [],
+          accountLabel:
+            session.accountLabel ||
+            session.teamName ||
+            session.workspaceName ||
+            session.composioToolkit ||
+            "",
+          keyPreview: session.keyPreview || "",
+          updatedAt: session.updatedAt,
+          expiresAt: session.expiresAt || null,
+        }
+      : null,
+  };
+}
+
+function connectorSuccessHtml(provider) {
+  return `<!doctype html><html><head><title>Connector connected</title><style>body{font-family:-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif;background:#fbf7ef;color:#2f261f;display:grid;place-items:center;min-height:100vh;margin:0}.card{border:1px solid #d7c8b7;background:#fffaf2;border-radius:18px;padding:28px;max-width:460px;box-shadow:0 18px 60px rgba(120,71,35,.16)}h1{margin:0 0 10px;font-size:22px}p{color:#7d6b5a;line-height:1.5}</style></head><body><div class="card"><h1>${provider} connected</h1><p>You can close this tab and return to Control Room. The token is stored locally on this computer.</p></div></body></html>`;
+}
+
+async function exchangeConnectorOAuthCode(provider, code) {
+  const config = getConnectorOAuthConfig(provider);
+  if (!config?.clientId || !config?.clientSecret) {
+    throw new Error(`${provider} OAuth is not configured. Add client id and client secret to .env.runtime.local.`);
+  }
+
+  const redirectUri = connectorRedirectUri(provider);
+  let tokenPayload;
+
+  if (provider === "notion") {
+    const response = await fetch(config.tokenUrl, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Basic ${Buffer.from(`${config.clientId}:${config.clientSecret}`).toString("base64")}`,
+      },
+      body: JSON.stringify({
+        grant_type: "authorization_code",
+        code,
+        redirect_uri: redirectUri,
+      }),
+    });
+    tokenPayload = await response.json();
+    if (!response.ok) {
+      throw new Error(tokenPayload?.error || "Notion OAuth token exchange failed.");
+    }
+  } else {
+    const response = await fetch(config.tokenUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        client_id: config.clientId,
+        client_secret: config.clientSecret,
+        code,
+        grant_type: "authorization_code",
+        redirect_uri: redirectUri,
+      }),
+    });
+    tokenPayload = await response.json();
+    if (!response.ok || tokenPayload?.ok === false) {
+      throw new Error(tokenPayload?.error_description || tokenPayload?.error || `${provider} OAuth token exchange failed.`);
+    }
+  }
+
+  const accessToken = tokenPayload.access_token || tokenPayload.authed_user?.access_token || "";
+  if (!accessToken) {
+    throw new Error(`${provider} did not return an access token.`);
+  }
+
+  const expiresAt = tokenPayload.expires_in
+    ? new Date(Date.now() + Number(tokenPayload.expires_in) * 1000).toISOString()
+    : null;
+
+  runtimeState.connectorSessions[provider] = {
+    provider,
+    authType: "oauth",
+    accessToken,
+    refreshToken: tokenPayload.refresh_token || runtimeState.connectorSessions[provider]?.refreshToken || "",
+    scopes:
+      typeof tokenPayload.scope === "string"
+        ? tokenPayload.scope.split(/[,\s]+/).filter(Boolean)
+        : config.scopes,
+    accountLabel:
+      tokenPayload.team?.name ||
+      tokenPayload.workspace_name ||
+      tokenPayload.owner?.user?.person?.email ||
+      tokenPayload.bot_id ||
+      provider,
+    raw: tokenPayload,
+    updatedAt: new Date().toISOString(),
+    expiresAt,
+  };
+  saveConnectorSessions();
+  return connectorAuthStatus(provider);
 }
 
 function browserUseHeaders() {
@@ -565,11 +1231,38 @@ function normalizeBrowserUseSession(payload, fallback = {}) {
     payload?.browserLiveViewUrl ||
     fallback.liveUrl ||
     "";
+  const output =
+    typeof payload?.output === "string"
+      ? payload.output
+      : typeof payload?.result === "string"
+        ? payload.result
+        : typeof payload?.summary === "string"
+          ? payload.summary
+          : typeof fallback.output === "string"
+            ? fallback.output
+            : "";
+  const error =
+    typeof payload?.error === "string"
+      ? payload.error
+      : typeof payload?.error_message === "string"
+        ? payload.error_message
+        : typeof fallback.error === "string"
+          ? fallback.error
+          : "";
 
   return {
     id,
     status: payload?.status || fallback.status || "created",
     liveUrl,
+    output,
+    error,
+    messages: Array.isArray(payload?.messages) ? payload.messages : fallback.messages || [],
+    model: payload?.model || fallback.model || browserUseModel,
+    totalCostUsd:
+      payload?.total_cost_usd ||
+      payload?.totalCostUsd ||
+      fallback.totalCostUsd ||
+      "",
     task: payload?.task || fallback.task || "",
     createdAt: payload?.created_at || payload?.createdAt || fallback.createdAt || new Date().toISOString(),
     updatedAt: new Date().toISOString(),
@@ -596,12 +1289,20 @@ function upsertBrowserUseSession(session) {
 }
 
 async function createBrowserUseSession(input = {}) {
+  const body = {
+    task: input.task || "Open a browser session and wait for instructions.",
+    model: input.model || browserUseModel,
+    keepAlive: Boolean(input.keepAlive),
+    maxCostUsd: input.maxCostUsd || browserUseMaxCostUsd,
+    skills: true,
+    agentmail: false,
+    cacheScript: false,
+  };
+
   const response = await fetch(`${browserUseBaseUrl}/sessions`, {
     method: "POST",
     headers: browserUseHeaders(),
-    body: JSON.stringify({
-      task: input.task || "Open a browser session and wait for instructions.",
-    }),
+    body: JSON.stringify(body),
   });
 
   if (!response.ok) {
@@ -637,16 +1338,52 @@ async function getBrowserUseSession(sessionId) {
 
   const payload = await response.json();
   const existing = runtimeState.browserUseSessions.find((entry) => entry.id === sessionId) || {};
+  let messages = existing.messages || [];
+
+  try {
+    const messagesResponse = await fetch(
+      `${browserUseBaseUrl}/sessions/${encodeURIComponent(sessionId)}/messages?limit=100`,
+      {
+        method: "GET",
+        headers: browserUseHeaders(),
+      },
+    );
+    if (messagesResponse.ok) {
+      const messagesPayload = await messagesResponse.json();
+      messages = Array.isArray(messagesPayload?.messages)
+        ? messagesPayload.messages
+        : messages;
+    }
+  } catch {
+    // Message history is helpful context, but session status/output is enough.
+  }
+
+  const inferredOutput =
+    typeof payload?.output === "string" && payload.output.trim()
+      ? payload.output
+      : messages
+          .filter((message) =>
+            ["assistant", "agent", "system"].includes(
+              String(message?.role || "").toLowerCase(),
+            ),
+          )
+          .map((message) => message?.summary || message?.data || "")
+          .filter(Boolean)
+          .slice(-3)
+          .join("\n\n");
+
   return upsertBrowserUseSession({
     ...existing,
     ...payload,
     id: sessionId,
+    output: inferredOutput,
+    messages,
   });
 }
 
 async function stopBrowserUseSession(sessionId) {
-  const response = await fetch(`${browserUseBaseUrl}/sessions/${encodeURIComponent(sessionId)}`, {
-    method: "DELETE",
+  const response = await fetch(`${browserUseBaseUrl}/sessions/${encodeURIComponent(sessionId)}/stop`, {
+    method: "POST",
     headers: browserUseHeaders(),
   });
 
@@ -666,6 +1403,32 @@ async function stopBrowserUseSession(sessionId) {
   });
 
   return session;
+}
+
+function isBrowserUseTerminalStatus(status = "") {
+  return ["completed", "idle", "stopped", "failed", "error", "timed_out", "timeout", "finished", "done"].includes(
+    String(status).toLowerCase(),
+  );
+}
+
+function browserUseSessionOutput(session) {
+  if (typeof session?.output === "string" && session.output.trim()) {
+    return session.output.trim();
+  }
+
+  const messageOutput = (session?.messages || [])
+    .filter((message) => ["assistant", "agent", "system"].includes(String(message?.role || "").toLowerCase()))
+    .map((message) => message?.summary || message?.data || "")
+    .filter(Boolean)
+    .slice(-4)
+    .join("\n\n")
+    .trim();
+
+  if (messageOutput) {
+    return messageOutput;
+  }
+
+  return session?.error ? `Browser Use error: ${session.error}` : "";
 }
 
 function resolveGitHubModelsToken() {
@@ -852,6 +1615,87 @@ function shouldFallbackFromCopilotProxy(status, message = "") {
   );
 }
 
+const VISION_CAPABLE_PATTERNS = [
+  /^gpt-4o/,
+  /^gpt-4-turbo/,
+  /^gpt-4\.1/,
+  /^gpt-4v/,
+  /^o[1-4]/,
+  /^chatgpt-4o/,
+  /^claude-3/,
+  /^claude-4/,
+  /^gemini-1\.5/,
+  /^gemini-2/,
+  /^gemini-3/,
+  /^gemini-4/,
+  /^gemma-3/,
+  /^gemma-4/,
+  /vision/,
+  /vl[-_]?/i,
+  /multimodal/i,
+  /llama-3\.2-\d+b-vision/,
+  /llama-3\.2-11b-vision/,
+  /llama-3\.2-90b-vision/,
+  /llama-4/,
+  /phi-3-vision/,
+  /phi-4-multimodal/,
+  /kosmos/,
+  /fuyu/,
+  /neva/,
+  /vila/,
+  /nemotron-nano-12b-v2-vl/,
+  /nemotron-nano-vl/,
+  /cosmos-reason/,
+  /minimax-m2/,
+  /kimi-k2/,
+  /glm-5/,
+  /glm5/,
+  /devstral-2/,
+  /step-3\.5/,
+  /deepseek-v3\.[12]/,
+  /deepseek-v4/,
+  /mistral-large-3/,
+  /mistral-medium-3/,
+  /mistral-small-4/,
+  /magistral/,
+  /qwen3\.5/,
+  /qwen3-coder/,
+  /qwen3-next/,
+  /moonshot/,
+];
+
+function modelSupportsVision(provider, model) {
+  const providerValue = `${provider}`.toLowerCase();
+  const modelValue = `${model}`.toLowerCase();
+
+  if (providerValue === "openai") return true;
+  if (providerValue === "anthropic") return true;
+  if (providerValue === "gemini") return true;
+  if (providerValue === "copilot") return true;
+
+  for (const pattern of VISION_CAPABLE_PATTERNS) {
+    if (pattern.test(modelValue)) return true;
+  }
+
+  return false;
+}
+
+function conversationHasImages(conversation) {
+  return conversation.some(
+    (message) => Array.isArray(message.attachments) && message.attachments.length > 0,
+  );
+}
+
+function stripImagesFromConversation(conversation) {
+  return conversation.map((message) => {
+    if (!Array.isArray(message.attachments) || message.attachments.length === 0) {
+      return message;
+    }
+    const { attachments, ...rest } = message;
+    return rest;
+  });
+}
+
 function normalizeProvider(provider = "", model = "") {
   const providerValue = `${provider}`.toLowerCase();
   const modelValue = providerValue.includes("copilot")
@@ -868,6 +1712,14 @@ function normalizeProvider(provider = "", model = "") {
 
   if (providerValue.includes("groq")) {
     return "groq";
+  }
+
+  if (providerValue.includes("nvidia") || providerValue.includes("nim")) {
+    return "nvidia";
+  }
+
+  if (providerValue.includes("modal")) {
+    return "modal";
   }
 
   if (providerValue.includes("openrouter")) {
@@ -894,6 +1746,19 @@ function normalizeProvider(provider = "", model = "") {
     return "gemini";
   }
 
+  if (
+    modelValue.startsWith("nvidia/") ||
+    modelValue.includes("nemotron") ||
+    modelValue.includes("llama-3.") ||
+    modelValue.includes("mistral")
+  ) {
+    return "nvidia";
+  }
+
+  if (modelValue.includes("glm") || modelValue.startsWith("zai-org/")) {
+    return "modal";
+  }
+
   if (modelValue.includes("gpt")) {
     return "openai";
   }
@@ -903,7 +1768,7 @@ function normalizeProvider(provider = "", model = "") {
   }
 
   throw new Error(
-    `Unsupported provider "${provider}". Right now the local runtime supports OpenAI, Anthropic, OpenRouter, Gemini, Groq, and GitHub Models.`,
+    `Unsupported provider "${provider}". Right now the local runtime supports OpenAI, Anthropic, OpenRouter, Gemini, Groq, NVIDIA, Modal, and GitHub Models.`,
   );
 }
 
@@ -959,14 +1824,28 @@ function normalizeConversation(messages = []) {
 
 function buildSystemPrompt(agent) {
   const enabledTools = Object.entries(agent.permissions ?? {})
-    .filter(([, enabled]) => Boolean(enabled))
+    .filter(([, enabled]) => typeof enabled === "boolean" && Boolean(enabled))
     .map(([tool]) => tool)
+    .join(", ");
+  const enabledConnectors = Object.entries(agent.permissions?.connectors ?? {})
+    .filter(([, enabled]) => Boolean(enabled))
+    .map(([connector]) => connector)
+    .join(", ");
+  const enabledAutomations = Object.entries(agent.permissions?.automations ?? {})
+    .filter(([, enabled]) => Boolean(enabled))
+    .map(([automation]) => automation)
     .join(", ");
 
   return [
     agent.systemPrompt?.trim() || `You are ${agent.name}, a specialist inside a personal multi-agent workspace.`,
     agent.objective ? `Current objective: ${agent.objective}` : "",
     enabledTools ? `Enabled capabilities: ${enabledTools}.` : "Enabled capabilities: reasoning only.",
+    enabledConnectors
+      ? `Enabled connectors: ${enabledConnectors}. Use them through the available browser, HTTP, git, file, terminal, and runtime tools. If a connector lacks OAuth/token configuration, say what credential is needed instead of pretending it worked.`
+      : "",
+    enabledAutomations
+      ? `Enabled automation triggers for this agent: ${enabledAutomations}. When an automation run is triggered, complete the requested action and report final status from actual tool/runtime output.`
+      : "",
     agent.permissions?.terminal
       ? "Terminal is an available tool, but do not claim that you executed shell commands unless command results are explicitly present in the conversation."
       : "",
@@ -1012,7 +1891,7 @@ function buildResponsesInput(conversation) {
       ...(message.content?.trim()
         ? [
             {
-              type: "input_text",
+              type: message.role === "assistant" ? "output_text" : "input_text",
               text: message.content.trim(),
             },
           ]
@@ -1395,6 +2274,82 @@ async function callGroq(agent, conversation) {
     text,
     usage: payload.usage ?? null,
     provider: "groq",
+  };
+}
+
+async function callNvidia(agent, conversation) {
+  const apiKey = process.env.NVIDIA_API_KEY;
+  if (!apiKey) {
+    throw new Error("NVIDIA_API_KEY is missing in the local runtime environment.");
+  }
+
+  const response = await fetch("https://integrate.api.nvidia.com/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      model: agent.model || process.env.NVIDIA_CHAT_MODEL || "nvidia/llama-3.3-nemotron-super-49b-v1.5",
+      max_tokens: 1200,
+      messages: buildOpenAICompatibleMessages(agent, conversation),
+    }),
+  });
+
+  if (!response.ok) {
+    throw new Error(`NVIDIA error: ${await parseErrorResponse(response)}`);
+  }
+
+  const payload = await response.json();
+  const text = extractOpenRouterText(payload);
+
+  if (!text) {
+    throw new Error("NVIDIA returned an empty response.");
+  }
+
+  return {
+    text,
+    usage: payload.usage ?? null,
+    provider: "nvidia",
+  };
+}
+
+async function callModal(agent, conversation) {
+  const apiKey = process.env.MODAL_API_KEY;
+  if (!apiKey) {
+    throw new Error("MODAL_API_KEY is missing in the local runtime environment.");
+  }
+
+  const baseUrl = process.env.MODAL_API_BASE_URL || "https://api.us-west-2.modal.direct";
+
+  const response = await fetch(`${baseUrl}/v1/chat/completions`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      model: agent.model || "zai-org/GLM-5.1-FP8",
+      max_tokens: 1200,
+      messages: buildOpenAICompatibleMessages(agent, conversation),
+    }),
+  });
+
+  if (!response.ok) {
+    throw new Error(`Modal error: ${await parseErrorResponse(response)}`);
+  }
+
+  const payload = await response.json();
+  const text = extractOpenRouterText(payload);
+
+  if (!text) {
+    throw new Error("Modal returned an empty response.");
+  }
+
+  return {
+    text,
+    usage: payload.usage ?? null,
+    provider: "modal",
   };
 }
 
@@ -1857,6 +2812,14 @@ async function runChat(body) {
   const provider = normalizeProvider(agent.provider, agent.model);
   let conversation = normalizeConversation(body.messages);
 
+  if (conversationHasImages(conversation) && !modelSupportsVision(agent.provider, agent.model)) {
+    conversation = stripImagesFromConversation(conversation);
+    const lastUser = [...conversation].reverse().find((m) => m.role === "user");
+    if (lastUser) {
+      lastUser.content = `${lastUser.content}\n\n[Note: You attached an image, but the current model (${agent.model}) does not support image input. The image has been removed from this request. Switch to a vision-capable model like GPT-4o, Claude 3, or Gemini to use image attachments.]`;
+    }
+  }
+
   // Phase 4 — Module 18: inject Digital Twin profile if it has meaningful data
   const hasProfileData =
     (phase4UserProfile.techStack?.length ?? 0) > 0 ||
@@ -1889,6 +2852,14 @@ async function runChat(body) {
 
   if (provider === "groq") {
     return callGroq(agent, conversation);
+  }
+
+  if (provider === "nvidia") {
+    return callNvidia(agent, conversation);
+  }
+
+  if (provider === "modal") {
+    return callModal(agent, conversation);
   }
 
   if (provider === "githubmodels") {
@@ -2677,6 +3648,47 @@ const TOOL_DEFINITIONS = [
     ],
   },
   {
+    name: "browser.run",
+    category: "browser",
+    description: "Run a full Browser Use cloud agent task that can navigate, click, type, read pages, and return a final result.",
+    riskLevel: "medium",
+    requiresApproval: true,
+    parameters: [
+      { name: "task", type: "string", required: true },
+      { name: "timeout", type: "number", required: false, default: 180000 },
+      { name: "model", type: "string", required: false },
+      { name: "maxCostUsd", type: "string", required: false },
+    ],
+  },
+  {
+    name: "gmail.draft",
+    category: "connector",
+    description: "Create a Gmail draft through the connected Composio Gmail account.",
+    riskLevel: "medium",
+    requiresApproval: false,
+    parameters: [
+      { name: "to", type: "string", required: true },
+      { name: "subject", type: "string", required: true },
+      { name: "body", type: "string", required: true },
+      { name: "cc", type: "string", required: false },
+      { name: "bcc", type: "string", required: false },
+    ],
+  },
+  {
+    name: "gmail.send",
+    category: "connector",
+    description: "Send a Gmail message through the connected Composio Gmail account.",
+    riskLevel: "high",
+    requiresApproval: true,
+    parameters: [
+      { name: "to", type: "string", required: true },
+      { name: "subject", type: "string", required: true },
+      { name: "body", type: "string", required: true },
+      { name: "cc", type: "string", required: false },
+      { name: "bcc", type: "string", required: false },
+    ],
+  },
+  {
     name: "filesystem.read",
     category: "filesystem",
     description: "Read file contents from the workspace.",
@@ -2949,16 +3961,40 @@ function checkToolApprovalNeeded(toolName, parameters, agent, sandboxMode) {
     };
   }
 
-  if (toolName === "browser.fetch" || toolName === "browser.extract") {
+  if (toolName === "gmail.send") {
+    const to = `${parameters.to || ""}`.trim();
+    const subject = `${parameters.subject || ""}`.trim();
+    const body = `${parameters.body || ""}`.trim();
+    return {
+      needed: true,
+      reasons: [
+        "It will send an email from your connected Gmail account.",
+      ],
+      preview: {
+        summary: [
+          `To: ${to || "(missing recipient)"}`,
+          `Subject: ${subject || "(missing subject)"}`,
+          "",
+          body.slice(0, 600),
+        ].join("\n"),
+      },
+    };
+  }
+
+  if (toolName === "browser.fetch" || toolName === "browser.extract" || toolName === "browser.run") {
     const url = parameters.url || "";
     return {
       needed: true,
-      reasons: ["It fetches external web content for browsing or scraping."],
+      reasons: [
+        toolName === "browser.run"
+          ? "It launches an autonomous Browser Use cloud session that can navigate, click, type, and read pages."
+          : "It fetches external web content for browsing or scraping.",
+      ],
       preview: {
         command: undefined,
         filePaths: [],
         diff: undefined,
-        url,
+        url: toolName === "browser.run" ? undefined : url,
         method: "GET",
       },
     };
@@ -3035,7 +4071,9 @@ async function executeToolInternal(toolName, parameters, agent, workspacePath) {
       method: "GET",
       signal: AbortSignal.timeout(timeoutMs),
       headers: {
-        "User-Agent": "control-room-browser/1.0",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
       },
     });
 
@@ -3063,6 +4101,51 @@ async function executeToolInternal(toolName, parameters, agent, workspacePath) {
               durationMs: Date.now() - startedAt,
             },
     };
+  }
+
+  if (toolName === "browser.run") {
+    const task = parameters.task || "";
+    const timeoutMs = parameters.timeout || 180000;
+    if (!browserUseApiKey) {
+      throw new Error("BROWSER_USE_API_KEY is missing in the local runtime environment.");
+    }
+
+    let session = await createBrowserUseSession({
+      task,
+      agentId: agent?.id || "",
+      agentName: agent?.name || "",
+      model: parameters.model || browserUseModel,
+      maxCostUsd: parameters.maxCostUsd || browserUseMaxCostUsd,
+    });
+
+    const deadline = Date.now() + timeoutMs;
+    while (!isBrowserUseTerminalStatus(session.status) && Date.now() < deadline) {
+      await new Promise((resolvePromise) => setTimeout(resolvePromise, 4000));
+      session = await getBrowserUseSession(session.id);
+    }
+
+    const output = browserUseSessionOutput(session);
+    return {
+      ok: !["failed", "error", "timed_out", "timeout"].includes(String(session.status).toLowerCase()),
+      tool: toolName,
+      data: {
+        sessionId: session.id,
+        status: session.status,
+        liveUrl: session.liveUrl,
+        output,
+        model: session.model,
+        totalCostUsd: session.totalCostUsd,
+        durationMs: Date.now() - startedAt,
+      },
+    };
+  }
+
+  if (toolName === "gmail.send") {
+    return await sendGmailMessage(parameters);
+  }
+
+  if (toolName === "gmail.draft") {
+    return await draftGmailMessage(parameters);
   }
 
   if (toolName === "filesystem.read") {
@@ -3548,6 +4631,7 @@ async function handleToolInvocation(body) {
         approvalRequired: true,
         approvalRequestId: approvalRequest.id,
         approvalReasons: approvalCheck.reasons,
+        preview: approvalRequest.preview,
       };
     }
   }
@@ -3857,6 +4941,19 @@ async function validateProviderKey(provider, apiKey) {
         checkedAt: new Date().toISOString(),
       };
     }
+    if (provider === "nvidia") {
+      const response = await fetch("https://integrate.api.nvidia.com/v1/models", {
+        headers: { Authorization: `Bearer ${apiKey}` },
+        signal: AbortSignal.timeout(10000),
+      });
+      return {
+        ok: response.ok,
+        latencyMs: Date.now() - startedAt,
+        model: "nvidia/llama-3.3-nemotron-super-49b-v1.5",
+        error: response.ok ? null : `HTTP ${response.status}`,
+        checkedAt: new Date().toISOString(),
+      };
+    }
     if (provider === "openrouter") {
       const response = await fetch("https://openrouter.ai/api/v1/models", {
         headers: { Authorization: `Bearer ${apiKey}` },
@@ -3930,12 +5027,222 @@ const server = createServer(async (request, response) => {
         ok: true,
         runtime: "control-room-local-runtime",
         providers: providerAvailability(),
+        connectors: connectorAvailability(),
+        connectorSessions: publicConnectorSessions(),
         auth: githubAuthStatus(),
         browserUse: browserUseStatus(),
         runs: {
           retained: runtimeState.commandRuns.length,
         },
       });
+      return;
+    }
+
+    if (request.method === "GET" && url.pathname === "/v1/connectors") {
+      sendJson(response, 200, {
+        ok: true,
+        connectors: connectorAvailability(),
+        sessions: publicConnectorSessions(),
+        oauth: {
+          google: connectorAuthStatus("google"),
+          gmail: connectorAuthStatus("gmail"),
+          googleDrive: connectorAuthStatus("googleDrive"),
+          googleCalendar: connectorAuthStatus("googleCalendar"),
+          slack: connectorAuthStatus("slack"),
+          notion: connectorAuthStatus("notion"),
+          github: connectorAuthStatus("github"),
+          vercel: connectorAuthStatus("vercel"),
+        },
+        composio: {
+          configured: Boolean(getComposioApiKey()),
+          userId: composioUserId,
+          baseUrl: composioBaseUrl,
+          toolkits: composioConnectorToolkits,
+        },
+      });
+      return;
+    }
+
+    if (request.method === "POST" && url.pathname.match(/^\/v1\/connectors\/[^/]+\/oauth\/start$/)) {
+      const provider = decodeURIComponent(url.pathname.slice("/v1/connectors/".length, -"/oauth/start".length));
+      if (isComposioConnector(provider) && getComposioApiKey()) {
+        try {
+          sendJson(response, 200, await startComposioConnector(provider));
+        } catch (err) {
+          sendJson(response, 500, {
+            ok: false,
+            provider,
+            connectorProvider: "composio",
+            error: err instanceof Error ? err.message : "Failed to start Composio connector.",
+          });
+        }
+        return;
+      }
+
+      if (isComposioConnector(provider) && !getComposioApiKey()) {
+        sendJson(response, 400, {
+          ok: false,
+          provider,
+          connectorProvider: "composio",
+          configured: false,
+          error: "Add COMPOSIO_API_KEY in .env.runtime.local or save it in Connector Hub, then try again.",
+        });
+        return;
+      }
+
+      const config = getConnectorOAuthConfig(provider);
+      if (!config) {
+        sendJson(response, 400, { ok: false, error: `${provider} does not support OAuth start from this runtime yet.` });
+        return;
+      }
+      if (!config.clientId || !config.clientSecret) {
+        sendJson(response, 400, {
+          ok: false,
+          error: `Add ${provider.toUpperCase()}_CLIENT_ID and ${provider.toUpperCase()}_CLIENT_SECRET to .env.runtime.local, then restart the runtime.`,
+          configured: false,
+        });
+        return;
+      }
+
+      const state = randomUUID();
+      pendingConnectorOAuth.set(state, { provider, createdAt: Date.now() });
+      const params = new URLSearchParams({
+        client_id: config.clientId,
+        redirect_uri: connectorRedirectUri(provider),
+        state,
+      });
+
+      if (provider === "google") {
+        params.set("response_type", "code");
+        params.set("access_type", "offline");
+        params.set("prompt", "consent");
+        params.set("scope", config.scopes.join(" "));
+      } else if (provider === "slack") {
+        params.set("scope", config.scopes.join(","));
+      } else if (provider === "notion") {
+        params.set("response_type", "code");
+        params.set("owner", "user");
+      }
+
+      sendJson(response, 200, {
+        ok: true,
+        provider,
+        authUrl: `${config.authUrl}?${params.toString()}`,
+        redirectUri: connectorRedirectUri(provider),
+        scopes: config.scopes,
+      });
+      return;
+    }
+
+    if (request.method === "GET" && url.pathname === "/v1/connectors/composio/callback") {
+      const provider = url.searchParams.get("provider") || "";
+      const connectedAccountId =
+        url.searchParams.get("connected_account_id") ||
+        url.searchParams.get("connectedAccountId") ||
+        url.searchParams.get("account_id") ||
+        url.searchParams.get("id") ||
+        runtimeState.connectorSessions?.[provider]?.composioConnectedAccountId ||
+        "";
+
+      response.setHeader("Content-Type", "text/html");
+      if (!provider || !isComposioConnector(provider)) {
+        response.statusCode = 400;
+        response.end("<h1>Composio connector failed</h1><p>Missing connector provider.</p>");
+        return;
+      }
+
+      try {
+        if (connectedAccountId) {
+          await refreshComposioConnector(provider, connectedAccountId);
+        } else {
+          runtimeState.connectorSessions[provider] = {
+            ...(runtimeState.connectorSessions[provider] || {}),
+            provider,
+            authType: "composio",
+            composioToolkit: composioConnectorToolkits[provider],
+            accountLabel: `${composioConnectorToolkits[provider]} via Composio`,
+            updatedAt: new Date().toISOString(),
+          };
+          saveConnectorSessions();
+        }
+        response.statusCode = 200;
+        response.end(connectorSuccessHtml(`${provider} via Composio`));
+      } catch (err) {
+        response.statusCode = 500;
+        response.end(`<h1>Composio connector failed</h1><p>${String(err.message || err)}</p>`);
+      }
+      return;
+    }
+
+    if (request.method === "GET" && url.pathname.match(/^\/v1\/connectors\/[^/]+\/callback$/)) {
+      const provider = decodeURIComponent(url.pathname.slice("/v1/connectors/".length, -"/callback".length));
+      const code = url.searchParams.get("code") || "";
+      const state = url.searchParams.get("state") || "";
+      const pending = pendingConnectorOAuth.get(state);
+      if (!code || !pending || pending.provider !== provider) {
+        response.statusCode = 400;
+        response.setHeader("Content-Type", "text/html");
+        response.end("<h1>Connector auth failed</h1><p>Missing or invalid OAuth state/code.</p>");
+        return;
+      }
+
+      try {
+        pendingConnectorOAuth.delete(state);
+        await exchangeConnectorOAuthCode(provider, code);
+        response.statusCode = 200;
+        response.setHeader("Content-Type", "text/html");
+        response.end(connectorSuccessHtml(provider));
+      } catch (err) {
+        response.statusCode = 500;
+        response.setHeader("Content-Type", "text/html");
+        response.end(`<h1>Connector auth failed</h1><p>${String(err.message || err)}</p>`);
+      }
+      return;
+    }
+
+    if (request.method === "POST" && url.pathname.match(/^\/v1\/connectors\/[^/]+\/token$/)) {
+      const provider = decodeURIComponent(url.pathname.slice("/v1/connectors/".length, -"/token".length));
+      const body = await readJson(request);
+      const token = `${body?.token || ""}`.trim();
+      if (!token) {
+        sendJson(response, 400, { ok: false, error: "token is required." });
+        return;
+      }
+
+      runtimeState.connectorSessions[provider] = {
+        provider,
+        authType: "token",
+        apiKey: token,
+        keyPreview: maskSecretKey(token),
+        scopes: Array.isArray(body?.scopes) ? body.scopes : [],
+        accountLabel: body?.label || provider,
+        updatedAt: new Date().toISOString(),
+        expiresAt: body?.expiresAt || null,
+      };
+      saveConnectorSessions();
+      sendJson(response, 200, { ok: true, session: publicConnectorSessions()[provider] });
+      return;
+    }
+
+    if (request.method === "POST" && url.pathname.match(/^\/v1\/connectors\/[^/]+\/disconnect$/)) {
+      const provider = decodeURIComponent(url.pathname.slice("/v1/connectors/".length, -"/disconnect".length));
+      delete runtimeState.connectorSessions[provider];
+      saveConnectorSessions();
+      sendJson(response, 200, { ok: true });
+      return;
+    }
+
+    if (request.method === "GET" && url.pathname === "/v1/connectors/gmail/latest") {
+      try {
+        const limit = Number(url.searchParams.get("limit") || 5);
+        const query = url.searchParams.get("q") || "";
+        sendJson(response, 200, await fetchLatestGmailMessages(limit, query));
+      } catch (err) {
+        sendJson(response, 500, {
+          ok: false,
+          error: err instanceof Error ? err.message : "Failed to read Gmail through Composio.",
+        });
+      }
       return;
     }
 
@@ -3992,6 +5299,9 @@ const server = createServer(async (request, response) => {
         task: body?.task || "",
         agentId: body?.agentId || "",
         agentName: body?.agentName || "",
+        model: body?.model || "",
+        keepAlive: Boolean(body?.keepAlive),
+        maxCostUsd: body?.maxCostUsd || "",
       });
 
       sendJson(response, 200, {
@@ -4435,8 +5745,81 @@ const server = createServer(async (request, response) => {
 
     if (request.method === "GET" && url.pathname === "/v1/automations") {
       const automations = Array.from(automationsStore.values());
+      automations.forEach((automation) => scheduleAutomation(automation));
       sendJson(response, 200, { ok: true, automations });
       return;
+    }
+
+    function clearScheduledAutomation(automationId) {
+      const timer = scheduledTimers.get(automationId);
+      if (timer) {
+        clearTimeout(timer);
+        clearInterval(timer);
+        scheduledTimers.delete(automationId);
+      }
+    }
+
+    function getNextScheduleDelay(trigger = {}) {
+      const config = trigger.config || {};
+      const now = new Date();
+
+      if (config.runAt) {
+        return Math.max(1000, new Date(config.runAt).getTime() - now.getTime());
+      }
+
+      const cron = `${config.cron || ""}`.trim();
+      const hourlyMatch = cron.match(/^(\d{1,2}) \* \* \* \*$/);
+      if (hourlyMatch) {
+        const minute = Math.max(0, Math.min(59, Number(hourlyMatch[1]) || 0));
+        const next = new Date(now);
+        next.setSeconds(0, 0);
+        next.setMinutes(minute);
+        if (next <= now) {
+          next.setHours(next.getHours() + 1);
+        }
+        return next.getTime() - now.getTime();
+      }
+
+      const dailyMatch = cron.match(/^(\d{1,2}) (\d{1,2}) \* \* \*$/);
+      if (dailyMatch) {
+        const minute = Math.max(0, Math.min(59, Number(dailyMatch[1]) || 0));
+        const hour = Math.max(0, Math.min(23, Number(dailyMatch[2]) || 0));
+        const next = new Date(now);
+        next.setHours(hour, minute, 0, 0);
+        if (next <= now) {
+          next.setDate(next.getDate() + 1);
+        }
+        return next.getTime() - now.getTime();
+      }
+
+      return parseCronToMs(cron);
+    }
+
+    function scheduleAutomation(automation) {
+      clearScheduledAutomation(automation.id);
+      if (automation.status !== "active" || automation.trigger?.type !== "schedule") {
+        return;
+      }
+
+      const delay = getNextScheduleDelay(automation.trigger);
+      if (!Number.isFinite(delay) || delay <= 0) {
+        return;
+      }
+
+      const timer = setTimeout(async () => {
+        await executeAutomation(automation.id);
+        const latestAutomation = automationsStore.get(automation.id);
+        if (!latestAutomation) return;
+        if (latestAutomation.trigger?.config?.repeat === "once" || latestAutomation.trigger?.config?.runAt) {
+          latestAutomation.status = "paused";
+          latestAutomation.updatedAt = new Date().toISOString();
+          saveAutomationState();
+          scheduledTimers.delete(automation.id);
+          return;
+        }
+        scheduleAutomation(latestAutomation);
+      }, delay);
+      scheduledTimers.set(automation.id, timer);
     }
 
     if (request.method === "POST" && url.pathname === "/v1/automations") {
@@ -4452,7 +5835,7 @@ const server = createServer(async (request, response) => {
         id: `auto_${randomUUID()}`,
         name,
         agentId,
-        agentName: agentId,
+        agentName: body.agentName || action?.payload?.agent?.name || agentId,
         trigger,
         action,
         status: "active",
@@ -4467,15 +5850,8 @@ const server = createServer(async (request, response) => {
 
       automationsStore.set(automation.id, automation);
 
-      if (trigger.type === "schedule" && trigger.config?.cron) {
-        const intervalMs = parseCronToMs(trigger.config.cron);
-        if (intervalMs > 0) {
-          const timer = setInterval(() => {
-            void executeAutomation(automation.id);
-          }, intervalMs);
-          scheduledTimers.set(automation.id, timer);
-        }
-      }
+      scheduleAutomation(automation);
+      saveAutomationState();
 
       emitRuntimeEvent("automation:created", automation.id, agentId, agentId, { name, triggerType: trigger.type });
       sendJson(response, 200, { ok: true, automation });
@@ -4501,12 +5877,11 @@ const server = createServer(async (request, response) => {
       automation.updatedAt = new Date().toISOString();
 
       if (body.status === "paused" || body.status === "disabled") {
-        const timer = scheduledTimers.get(automationId);
-        if (timer) {
-          clearInterval(timer);
-          scheduledTimers.delete(automationId);
-        }
+        clearScheduledAutomation(automationId);
+      } else if (automation.status === "active") {
+        scheduleAutomation(automation);
       }
+      saveAutomationState();
 
       sendJson(response, 200, { ok: true, automation });
       return;
@@ -4514,19 +5889,17 @@ const server = createServer(async (request, response) => {
 
     if (request.method === "DELETE" && url.pathname.match(/^\/v1\/automations\/[^/]+$/)) {
       const automationId = decodeURIComponent(url.pathname.slice("/v1/automations/".length));
-      const timer = scheduledTimers.get(automationId);
-      if (timer) {
-        clearInterval(timer);
-        scheduledTimers.delete(automationId);
-      }
+      clearScheduledAutomation(automationId);
       automationsStore.delete(automationId);
+      automationRunsStore.delete(automationId);
+      saveAutomationState();
       sendJson(response, 200, { ok: true });
       return;
     }
 
     if (request.method === "POST" && url.pathname.match(/^\/v1\/automations\/[^/]+\/trigger$/)) {
       const automationId = decodeURIComponent(url.pathname.slice("/v1/automations/".length, -"/trigger".length));
-      const result = await executeAutomation(automationId);
+      const result = await executeAutomation(automationId, { allowPaused: true });
       sendJson(response, result.ok ? 200 : 400, result);
       return;
     }
@@ -4538,10 +5911,15 @@ const server = createServer(async (request, response) => {
       return;
     }
 
-    async function executeAutomation(automationId) {
+    async function executeAutomation(automationId, options = {}) {
       const automation = automationsStore.get(automationId);
       if (!automation) return { ok: false, error: "Automation not found." };
-      if (automation.status !== "active") return { ok: false, error: "Automation is paused or disabled." };
+      if (automation.status === "disabled") {
+        return { ok: false, error: "Automation is disabled." };
+      }
+      if (automation.status !== "active" && !options.allowPaused) {
+        return { ok: false, error: "Automation is paused." };
+      }
 
       const run = {
         id: `arun_${randomUUID()}`,
@@ -4570,15 +5948,21 @@ const server = createServer(async (request, response) => {
 
       try {
         if (automation.action.type === "command") {
-          const agent = { id: automation.agentId, name: automation.agentName };
+          const agent = automation.action.payload.agent || {
+            id: automation.agentId,
+            name: automation.agentName,
+          };
           const command = automation.action.payload.command || "echo 'Hello from automation'";
-          const cwd = automation.action.payload.cwd || process.cwd();
+          const cwd = automation.action.payload.cwd || agent.workspace || process.cwd();
           const execResult = await runCommand({ agent, command, cwd });
           run.runId = execResult.runId;
           run.status = execResult.ok ? "completed" : "failed";
           run.error = execResult.error || null;
         } else if (automation.action.type === "chat") {
-          const agent = { id: automation.agentId, name: automation.agentName };
+          const agent = automation.action.payload.agent || {
+            id: automation.agentId,
+            name: automation.agentName,
+          };
           const chatResult = await runChat({ agent, messages: [{ role: "user", content: automation.action.payload.message || "Execute scheduled task." }] });
           run.status = chatResult.ok ? "completed" : "failed";
           run.error = chatResult.error || null;
@@ -4595,6 +5979,7 @@ const server = createServer(async (request, response) => {
       run.durationMs = Date.now() - new Date(run.triggeredAt).getTime();
       automation.lastRunStatus = run.status;
       automation.updatedAt = new Date().toISOString();
+      saveAutomationState();
 
       emitRuntimeEvent("automation:completed", automationId, automation.agentId, automation.agentName, {
         runId: run.id,
@@ -4735,6 +6120,7 @@ const server = createServer(async (request, response) => {
         { provider: "anthropic", key: process.env.ANTHROPIC_API_KEY },
         { provider: "gemini", key: process.env.GEMINI_API_KEY },
         { provider: "groq", key: process.env.GROQ_API_KEY },
+        { provider: "nvidia", key: process.env.NVIDIA_API_KEY },
         { provider: "openrouter", key: process.env.OPENROUTER_API_KEY },
       ];
 
@@ -5457,6 +6843,8 @@ server.on("error", (error) => {
 });
 
 loadCopilotSession();
+loadConnectorSessions();
+loadAutomationState();
 
 server.listen(port, host, () => {
   log(`listening on http://${host}:${port}`);
