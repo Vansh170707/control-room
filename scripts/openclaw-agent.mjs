@@ -1,7 +1,17 @@
 #!/usr/bin/env node
 
 import { spawn } from "node:child_process";
+import { existsSync, statSync } from "node:fs";
+import { basename, dirname, resolve } from "node:path";
 import process from "node:process";
+import { fileURLToPath } from "node:url";
+import { config as loadEnv } from "dotenv";
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const rootDir = resolve(__dirname, "..");
+
+loadEnv({ path: resolve(rootDir, ".env.agent.local"), quiet: true });
+loadEnv({ path: resolve(rootDir, ".env.local"), override: false, quiet: true });
 
 const mode = process.argv[2];
 const rest = process.argv.slice(3);
@@ -36,8 +46,105 @@ function trimOutput(value, limit = 12000) {
   return value.length > limit ? `${value.slice(0, limit)}\n...[truncated]` : value;
 }
 
+function cleanArtifactCandidate(value) {
+  return String(value || "")
+    .trim()
+    .replace(/^file:\/\//i, "")
+    .replace(/^[`"']+|[`"',;.)\]]+$/g, "");
+}
+
+function resolveArtifactCandidate(candidate, cwd) {
+  let cleaned = cleanArtifactCandidate(candidate);
+
+  if (!cleaned) {
+    return "";
+  }
+
+  const home = process.env.HOME || "";
+  if (home) {
+    cleaned = cleaned.replace(/^\$HOME(?=\/|$)/, home).replace(/^~(?=\/|$)/, home);
+  }
+
+  return resolve(cwd, cleaned);
+}
+
+function artifactNameForPath(path) {
+  return basename(path) || path;
+}
+
+function extractArtifactsFromCommandResult({ command, cwd, stdout, stderr }) {
+  const candidates = new Set();
+  const extensionPattern =
+    "(?:pdf|txt|md|csv|tsv|json|jsonl|docx|xlsx|pptx|png|jpg|jpeg|webp|gif|svg|html|css|js|ts|tsx|py|sh|zip|tar|gz|mp3|mp4)";
+  const sources = [command, stdout, stderr].filter(Boolean).join("\n");
+  const optionRegex =
+    /(?:^|\s)(?:-o|--output|--output-document|--outfile)\s+(?:"([^"]+)"|'([^']+)'|([^\s]+))/gi;
+  const redirectRegex = /(?:^|\s)(?:>|1>|2>)\s*(?:"([^"]+)"|'([^']+)'|([^\s]+))/g;
+  const quotedPathRegex = new RegExp(
+    `["']((?:~|\\$HOME|/)[^"'\n]+?\\.${extensionPattern})["']`,
+    "gi",
+  );
+  const markerPathRegex = new RegExp(
+    `\\b(?:CREATED|SAVED|WROTE|WRITTEN|DOWNLOADED|GENERATED|OUTPUT|FILE):?\\s+((?:~|\\$HOME|/)[^\\n]+?\\.${extensionPattern})\\b`,
+    "gi",
+  );
+  const absolutePathRegex = new RegExp(
+    `(?:^|[\\s:=])((?:~|\\$HOME|/Users/|/tmp/|/var/|/private/tmp/)[^\\n"'<>|;&]*?\\.${extensionPattern})(?=$|[\\s,.;)\\]])`,
+    "gi",
+  );
+
+  for (const regex of [optionRegex, redirectRegex]) {
+    for (const match of sources.matchAll(regex)) {
+      candidates.add(match[1] || match[2] || match[3] || "");
+    }
+  }
+
+  for (const regex of [quotedPathRegex, markerPathRegex, absolutePathRegex]) {
+    for (const match of sources.matchAll(regex)) {
+      candidates.add(match[1] || "");
+    }
+  }
+
+  return Array.from(candidates)
+    .map((candidate) => resolveArtifactCandidate(candidate, cwd))
+    .filter(Boolean)
+    .filter((path, index, allPaths) => allPaths.indexOf(path) === index)
+    .flatMap((path) => {
+      try {
+        if (!existsSync(path)) {
+          return [];
+        }
+        const stats = statSync(path);
+        if (!stats.isFile()) {
+          return [];
+        }
+        return [
+          {
+            name: artifactNameForPath(path),
+            type: "file",
+            path,
+            size: stats.size,
+          },
+        ];
+      } catch {
+        return [];
+      }
+    });
+}
+
 function isPlainObject(value) {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function parseCsvList(value) {
+  return (value || "")
+    .split(",")
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+}
+
+function parseBoolean(value) {
+  return ["1", "true", "yes", "on"].includes(String(value || "").toLowerCase());
 }
 
 const supabaseUrl = process.env.CLAWBUDDY_SUPABASE_URL;
@@ -49,6 +156,30 @@ const agentId = process.env.CLAWBUDDY_AGENT_ID;
 const pollIntervalMs = Number(process.env.CLAWBUDDY_POLL_INTERVAL_MS ?? 5000);
 const heartbeatMs = Number(process.env.CLAWBUDDY_HEARTBEAT_MS ?? 60000);
 const baseWorkdir = process.env.CLAWBUDDY_WORKDIR || process.cwd();
+const commandAllowlist = parseCsvList(process.env.CLAWBUDDY_COMMAND_ALLOWLIST);
+const requireCommandAllowlist = parseBoolean(process.env.CLAWBUDDY_REQUIRE_COMMAND_ALLOWLIST);
+const allowShellOperators = parseBoolean(process.env.CLAWBUDDY_ALLOW_SHELL_OPERATORS);
+const disableBuiltinBlocklist = parseBoolean(process.env.CLAWBUDDY_DISABLE_BUILTIN_BLOCKLIST);
+const blockedCommandPatterns = [
+  ...(disableBuiltinBlocklist
+    ? []
+    : [
+        "\\bsudo\\b",
+        "\\brm\\s+-rf\\s+/(?:\\s|$)",
+        "\\bdd\\s+if=",
+        ":\\(\\)\\s*\\{\\s*:\\|:&\\s*\\};:",
+      ]),
+  ...parseCsvList(process.env.CLAWBUDDY_BLOCKED_COMMAND_PATTERNS),
+]
+  .map((pattern) => {
+    try {
+      return new RegExp(pattern, "i");
+    } catch {
+      console.warn(`Ignoring invalid CLAWBUDDY_BLOCKED_COMMAND_PATTERNS entry: ${pattern}`);
+      return null;
+    }
+  })
+  .filter(Boolean);
 
 if (!mode || !["heartbeat", "poll", "run"].includes(mode)) {
   usage();
@@ -187,6 +318,67 @@ function normalizeExecution(commandRecord) {
   };
 }
 
+function executionSummary(execution) {
+  return execution.shell
+    ? execution.command.trim()
+    : [execution.command, ...execution.args].filter(Boolean).join(" ").trim();
+}
+
+function matchesAllowlist(execution) {
+  if (commandAllowlist.length === 0) {
+    return !requireCommandAllowlist;
+  }
+
+  const summary = executionSummary(execution);
+  const executable = execution.command.trim();
+  const executableName = basename(executable);
+
+  return commandAllowlist.some((entry) => (
+    summary === entry ||
+    summary.startsWith(`${entry} `) ||
+    executable === entry ||
+    executableName === entry
+  ));
+}
+
+function validateExecutionPolicy(execution) {
+  const summary = executionSummary(execution);
+
+  if (
+    execution.shell &&
+    !allowShellOperators &&
+    (requireCommandAllowlist || commandAllowlist.length > 0) &&
+    /[;&|`$<>]/.test(summary)
+  ) {
+    return {
+      ok: false,
+      reason:
+        "Command blocked because shell operators are disabled by the local bridge safety policy. Set CLAWBUDDY_ALLOW_SHELL_OPERATORS=true only if you trust chained shell commands.",
+    };
+  }
+
+  for (const pattern of blockedCommandPatterns) {
+    if (pattern.test(summary)) {
+      return {
+        ok: false,
+        reason: `Command blocked by local bridge safety policy: ${pattern.source}`,
+      };
+    }
+  }
+
+  if (!matchesAllowlist(execution)) {
+    return {
+      ok: false,
+      reason:
+        commandAllowlist.length === 0
+          ? "Command blocked because CLAWBUDDY_REQUIRE_COMMAND_ALLOWLIST=true but CLAWBUDDY_COMMAND_ALLOWLIST is empty."
+          : `Command is not in CLAWBUDDY_COMMAND_ALLOWLIST: ${summary}`,
+    };
+  }
+
+  return { ok: true };
+}
+
 async function executeCommand({ command, args, cwd, env, shell, timeoutSeconds }) {
   return new Promise((resolve, reject) => {
     const startedAt = Date.now();
@@ -231,12 +423,21 @@ async function executeCommand({ command, args, cwd, env, shell, timeoutSeconds }
 
     child.on("close", (code) => {
       clearTimeout(timeout);
+      const trimmedStdout = trimOutput(stdout);
+      const trimmedStderr = trimOutput(stderr);
       resolve({
         exitCode: code ?? 1,
-        stdout: trimOutput(stdout),
-        stderr: trimOutput(stderr),
+        stdout: trimmedStdout,
+        stderr: trimmedStderr,
         durationMs: Date.now() - startedAt,
         timedOut,
+        cwd,
+        artifacts: extractArtifactsFromCommandResult({
+          command: shell ? command : [command, ...args].filter(Boolean).join(" "),
+          cwd,
+          stdout: trimmedStdout,
+          stderr: trimmedStderr,
+        }),
       });
     });
   });
@@ -245,6 +446,36 @@ async function executeCommand({ command, args, cwd, env, shell, timeoutSeconds }
 async function handleCommand(commandRecord) {
   const execution = normalizeExecution(commandRecord);
   const startedMessage = `Starting command ${commandRecord.id}: ${commandRecord.command}`;
+  const policy = validateExecutionPolicy(execution);
+
+  if (!policy.ok) {
+    await report({
+      status: "error",
+      currentActivity: `Blocked command: ${commandRecord.command}`,
+      events: [
+        {
+          action: `blocked command ${commandRecord.id}: ${commandRecord.command}`,
+        },
+      ],
+      logs: [
+        {
+          category: "reminder",
+          message: policy.reason,
+        },
+      ],
+      commandUpdates: [
+        {
+          id: commandRecord.id,
+          status: "failed",
+          result: {
+            error: policy.reason,
+          },
+          payload: commandRecord.payload,
+        },
+      ],
+    });
+    return;
+  }
 
   await report({
     status: "active",

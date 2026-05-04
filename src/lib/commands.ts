@@ -25,7 +25,7 @@ export async function issueAgentCommand(input: IssueAgentCommandInput) {
   });
 
   if (error) {
-    throw error;
+    throw new Error(error.message || "Failed to send a request to the Edge Function");
   }
 
   return data;

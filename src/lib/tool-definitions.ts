@@ -1,6 +1,9 @@
 export type ToolName =
   | "browser.fetch"
   | "browser.extract"
+  | "browser.run"
+  | "gmail.draft"
+  | "gmail.send"
   | "filesystem.read"
   | "filesystem.write"
   | "filesystem.list"
@@ -25,7 +28,7 @@ export interface ToolParameterSchema {
 
 export interface ToolDefinition {
   name: ToolName;
-  category: "browser" | "filesystem" | "code" | "git" | "shell" | "http" | "delegation";
+  category: "browser" | "filesystem" | "code" | "git" | "shell" | "http" | "delegation" | "connector";
   description: string;
   riskLevel: ToolRiskLevel;
   requiresApproval: boolean;
@@ -53,6 +56,7 @@ export interface ToolInvocationResult {
   approvalRequired?: boolean;
   approvalRequestId?: string;
   approvalReasons?: string[];
+  preview?: ToolApprovalRequest["preview"];
   durationMs?: number;
 }
 
@@ -70,6 +74,7 @@ export interface ToolApprovalRequest {
     diff?: string;
     url?: string;
     method?: string;
+    summary?: string;
   };
   requestedAt: string;
   expiresAt: string;
@@ -106,6 +111,50 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
       { name: "timeout", type: "number", required: false, description: "Timeout in milliseconds.", default: 30000 },
     ],
     responseShape: { type: "object", properties: { url: "string", status: "number", title: "string", text: "string", durationMs: "number" } },
+  },
+  {
+    name: "browser.run",
+    category: "browser",
+    description: "Run a full Browser Use cloud agent task that can navigate, click, type, read pages, and return a final result.",
+    riskLevel: "medium",
+    requiresApproval: true,
+    parameters: [
+      { name: "task", type: "string", required: true, description: "Natural-language browser task for the autonomous Browser Use agent." },
+      { name: "timeout", type: "number", required: false, description: "How long to wait for completion in milliseconds.", default: 180000 },
+      { name: "model", type: "string", required: false, description: "Optional Browser Use model override, such as bu-max." },
+      { name: "maxCostUsd", type: "string", required: false, description: "Optional cost cap for this browser session." },
+    ],
+    responseShape: { type: "object", properties: { sessionId: "string", status: "string", liveUrl: "string", output: "string", totalCostUsd: "string" } },
+  },
+  {
+    name: "gmail.draft",
+    category: "connector",
+    description: "Create a Gmail draft through the connected Composio Gmail account.",
+    riskLevel: "medium",
+    requiresApproval: false,
+    parameters: [
+      { name: "to", type: "string", required: true, description: "Primary recipient email address." },
+      { name: "subject", type: "string", required: true, description: "Draft subject line." },
+      { name: "body", type: "string", required: true, description: "Plain-text draft body." },
+      { name: "cc", type: "string", required: false, description: "Optional comma-separated cc recipients." },
+      { name: "bcc", type: "string", required: false, description: "Optional comma-separated bcc recipients." },
+    ],
+    responseShape: { type: "object", properties: { id: "string", messageId: "string", to: "string", subject: "string" } },
+  },
+  {
+    name: "gmail.send",
+    category: "connector",
+    description: "Send a Gmail message through the connected Composio Gmail account.",
+    riskLevel: "high",
+    requiresApproval: true,
+    parameters: [
+      { name: "to", type: "string", required: true, description: "Primary recipient email address." },
+      { name: "subject", type: "string", required: true, description: "Email subject line." },
+      { name: "body", type: "string", required: true, description: "Plain-text email body." },
+      { name: "cc", type: "string", required: false, description: "Optional comma-separated cc recipients." },
+      { name: "bcc", type: "string", required: false, description: "Optional comma-separated bcc recipients." },
+    ],
+    responseShape: { type: "object", properties: { id: "string", threadId: "string", labelIds: "array", to: "string", subject: "string" } },
   },
   {
     name: "filesystem.read",

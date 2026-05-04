@@ -31,6 +31,12 @@ export interface ThoughtPlan {
   raw: string;
 }
 
+function truncateMemoryText(value: string, limit = 3000) {
+  return value.length <= limit
+    ? value
+    : `${value.slice(0, limit)}\n...[trimmed memory context]`;
+}
+
 export async function loadMemoryContext(agentId: string): Promise<MemoryContextBundle> {
   const [threadResult, notesResult, knowledgeResult, filesResult] = await Promise.all([
     getThreadMemory(agentId),
@@ -60,7 +66,7 @@ export async function persistMemoryMessage(input: {
 
   await appendThreadMessage(input.agentId, {
     role: input.role,
-    content: input.content,
+    content: truncateMemoryText(input.content, 8000),
     sender: input.sender,
     timestamp: new Date().toISOString(),
     tokens: null,
@@ -81,14 +87,14 @@ export function buildMemoryContextMessage(bundle: MemoryContextBundle): RuntimeC
   const sections: string[] = [];
 
   if (bundle.thread?.summary) {
-    sections.push(`Thread summary:\n${bundle.thread.summary}`);
+    sections.push(`Thread summary:\n${truncateMemoryText(bundle.thread.summary, 3000)}`);
   }
 
   if (bundle.knowledge.length > 0) {
     sections.push(
       [
         "Relevant knowledge:",
-        ...bundle.knowledge.slice(0, 4).map((entry) => `- ${entry.title}: ${entry.content.slice(0, 220)}`),
+        ...bundle.knowledge.slice(0, 4).map((entry) => `- ${entry.title}: ${truncateMemoryText(entry.content, 220)}`),
       ].join("\n"),
     );
   }
@@ -97,7 +103,7 @@ export function buildMemoryContextMessage(bundle: MemoryContextBundle): RuntimeC
     sections.push(
       [
         "Pinned notes:",
-        ...bundle.notes.slice(0, 4).map((note) => `- ${note.title}: ${note.content.slice(0, 220)}`),
+        ...bundle.notes.slice(0, 4).map((note) => `- ${note.title}: ${truncateMemoryText(note.content, 220)}`),
       ].join("\n"),
     );
   }
@@ -106,7 +112,7 @@ export function buildMemoryContextMessage(bundle: MemoryContextBundle): RuntimeC
     sections.push(
       [
         "Attached files already known to memory:",
-        ...bundle.files.slice(0, 4).map((file) => `- ${file.name}: ${file.summary || file.path}`),
+        ...bundle.files.slice(0, 4).map((file) => `- ${file.name}: ${truncateMemoryText(file.summary || file.path, 240)}`),
       ].join("\n"),
     );
   }

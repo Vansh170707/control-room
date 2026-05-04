@@ -615,6 +615,225 @@
   .text-balance {
     text-wrap: balance;
   }
+
+  .claude-theme :where(
+    [class*="bg-\\[\\#0b0f14"],
+    [class*="bg-\\[\\#0b0f15"],
+    [class*="bg-\\[\\#0d1117"],
+    [class*="bg-\\[\\#0f1724"],
+    [class*="bg-\\[\\#12161d"],
+    [class*="bg-\\[\\#161b22"],
+    [class*="bg-\\[\\#162334"],
+    [class*="bg-\\[\\#1a2030"],
+    [class*="bg-\\[\\#1a1e22"],
+    [class*="bg-\\[\\#1e252e"],
+    [class*="bg-\\[\\#21262d"],
+    [class*="bg-white/\\["],
+    [class*="bg-white/8"],
+    [class*="bg-white/6"],
+    [class*="bg-white/4"],
+    [class*="bg-white/3"],
+    [class*="bg-white/2"]
+  ) {
+    background: #fbf7ef !important;
+    background-image: none !important;
+  }
+
+  .claude-theme :where(
+    [class*="bg-\\[linear-gradient\\(180deg\\,rgba\\(15"],
+    [class*="bg-\\[linear-gradient\\(180deg\\,rgba\\(16"],
+    [class*="bg-\\[linear-gradient\\(180deg\\,rgba\\(17"],
+    [class*="bg-\\[linear-gradient\\(180deg\\,rgba\\(18"],
+    [class*="bg-\\[linear-gradient\\(180deg\\,rgba\\(11"],
+    [class*="bg-\\[linear-gradient\\(180deg\\,rgba\\(10"],
+    [class*="bg-\\[linear-gradient\\(180deg\\,rgba\\(13"]
+  ) {
+    background: #fbf7ef !important;
+    background-image: none !important;
+  }
+
+  .claude-theme :where(
+    [class*="border-\\[\\#1e252e"],
+    [class*="border-\\[\\#21262d"],
+    [class*="border-\\[\\#30363d"],
+    [class*="border-\\[\\#2c3a4c"],
+    [class*="border-white"],
+    [class*="border-\\[white"]
+  ) {
+    border-color: #d7c8b7 !important;
+  }
+
+  .claude-theme :where([class*="divide-\\[\\#1e252e"], [class*="divide-white"]) > * + * {
+    border-color: #d7c8b7 !important;
+  }
+
+  .claude-theme :where(
+    [class*="text-\\[\\#e2e8f0"],
+    [class*="text-\\[\\#e6edf3"],
+    [class*="text-\\[\\#edf4f8"],
+    [class*="text-\\[\\#eef6fb"],
+    [class*="text-\\[\\#eef6ff"],
+    [class*="text-\\[\\#f5fbff"],
+    [class*="text-\\[\\#f5fbff"],
+    [class*="text-\\[\\#c9d1d9"],
+    [class*="text-\\[\\#d8e2eb"],
+    [class*="text-\\[\\#d9e4ee"],
+    [class*="text-\\[\\#dce7f0"],
+    [class*="text-\\[\\#dce7f2"],
+    [class*="text-\\[\\#e7eef6"]
+  ) {
+    color: #2f261f !important;
+  }
+
+  .claude-theme :where(
+    [class*="text-\\[\\#8b949e"],
+    [class*="text-\\[\\#8ea0b5"],
+    [class*="text-\\[\\#8fa1b3"],
+    [class*="text-\\[\\#9eb0c2"],
+    [class*="text-\\[\\#a8bacb"],
+    [class*="text-\\[\\#b5c7d8"],
+    [class*="text-\\[\\#b5c9d8"],
+    [class*="text-\\[\\#c3d0dc"],
+    [class*="text-\\[\\#6e7681"],
+    [class*="text-\\[\\#6e7f93"],
+    [class*="text-\\[\\#70849a"],
+    [class*="text-\\[\\#8296ab"]
+  ) {
+    color: #7d6b5a !important;
+  }
+
+  .claude-theme :where(
+    [class*="text-\\[\\#4f6880"],
+    [class*="text-\\[\\#4f6070"],
+    [class*="text-\\[\\#62758a"]
+  ) {
+    color: #9a8978 !important;
+  }
+
+  .claude-theme :where(
+    [class*="text-\\[\\#58a6ff"],
+    [class*="text-\\[\\#60a5fa"],
+    [class*="text-\\[\\#67e8f9"],
+    [class*="text-\\[\\#79c0ff"],
+    [class*="text-\\[\\#8fd3ff"],
+    [class*="text-\\[\\#8fd8ff"],
+    [class*="text-\\[\\#8fe7ff"],
+    [class*="text-cyan"]
+  ) {
+    color: #9a4f2c !important;
+  }
+
+  .claude-theme :where(
+    [class*="bg-\\[\\#10b981"],
+    [class*="bg-\\[\\#06b6d4"],
+    [class*="bg-\\[\\#34d399"],
+    [class*="bg-\\[\\#38bdf8"],
+    [class*="bg-\\[\\#3b82f6"],
+    [class*="bg-cyan"],
+    [class*="bg-primary"]
+  ) {
+    background: rgba(201, 100, 55, 0.12) !important;
+    background-image: none !important;
+  }
+
+  .claude-theme :where(
+    [class*="border-\\[\\#10b981"],
+    [class*="border-\\[\\#06b6d4"],
+    [class*="border-\\[\\#34d399"],
+    [class*="border-\\[\\#38bdf8"],
+    [class*="border-\\[\\#3b82f6"],
+    [class*="border-cyan"],
+    [class*="border-primary"]
+  ) {
+    border-color: rgba(201, 100, 55, 0.35) !important;
+  }
+
+  .claude-theme :where(
+    [class*='bg-[#0b0f14'],
+    [class*='bg-[#0b0f15'],
+    [class*='bg-[#0d1117'],
+    [class*='bg-[#0f1724'],
+    [class*='bg-[#12161d'],
+    [class*='bg-[#161b22'],
+    [class*='bg-[#162334'],
+    [class*='bg-[#1a2030'],
+    [class*='bg-[#1a1e22'],
+    [class*='bg-[#1e252e'],
+    [class*='bg-[#21262d'],
+    [class*='bg-white/']
+  ) {
+    background: #fbf7ef !important;
+    background-image: none !important;
+  }
+
+  .claude-theme :where(
+    [class*='border-[#1e252e'],
+    [class*='border-[#21262d'],
+    [class*='border-[#30363d'],
+    [class*='border-[#2c3a4c'],
+    [class*='border-white/']
+  ) {
+    border-color: #d7c8b7 !important;
+  }
+
+  .claude-theme :where([class*='divide-[#1e252e'], [class*='divide-white/']) > * + * {
+    border-color: #d7c8b7 !important;
+  }
+
+  .claude-theme :where(
+    [class*='text-[#e2e8f0'],
+    [class*='text-[#e6edf3'],
+    [class*='text-[#edf4f8'],
+    [class*='text-[#eef6fb'],
+    [class*='text-[#eef6ff'],
+    [class*='text-[#f5fbff'],
+    [class*='text-[#c9d1d9'],
+    [class*='text-[#d8e2eb'],
+    [class*='text-[#d9e4ee'],
+    [class*='text-[#dce7f0'],
+    [class*='text-[#dce7f2'],
+    [class*='text-[#e7eef6']
+  ) {
+    color: #2f261f !important;
+  }
+
+  .claude-theme :where(
+    [class*='text-[#8b949e'],
+    [class*='text-[#8ea0b5'],
+    [class*='text-[#8fa1b3'],
+    [class*='text-[#9eb0c2'],
+    [class*='text-[#a8bacb'],
+    [class*='text-[#b5c7d8'],
+    [class*='text-[#b5c9d8'],
+    [class*='text-[#c3d0dc'],
+    [class*='text-[#6e7681'],
+    [class*='text-[#6e7f93'],
+    [class*='text-[#70849a'],
+    [class*='text-[#8296ab']
+  ) {
+    color: #7d6b5a !important;
+  }
+
+  .claude-theme :where(
+    [class*='text-[#4f6880'],
+    [class*='text-[#4f6070'],
+    [class*='text-[#62758a']
+  ) {
+    color: #9a8978 !important;
+  }
+
+  .claude-theme :where(
+    [class*='bg-[linear-gradient(180deg,rgba(10'],
+    [class*='bg-[linear-gradient(180deg,rgba(11'],
+    [class*='bg-[linear-gradient(180deg,rgba(13'],
+    [class*='bg-[linear-gradient(180deg,rgba(15'],
+    [class*='bg-[linear-gradient(180deg,rgba(16'],
+    [class*='bg-[linear-gradient(180deg,rgba(17'],
+    [class*='bg-[linear-gradient(180deg,rgba(18']
+  ) {
+    background: #fbf7ef !important;
+    background-image: none !important;
+  }
 }
 
 /* ── Scrollbar ─────────────────────────────────────────────────── */
@@ -709,4 +928,3 @@ body.mobile-overlay-open {
   overflow: hidden;
   touch-action: none;
 }
-

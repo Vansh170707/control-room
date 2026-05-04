@@ -5008,6 +5008,411 @@ function buildRunTree(rootId) {
   };
 }
 
+function buildToolSchemaDescription(agent) {
+  const permissions = agent.permissions || {};
+  const sandboxMode = agent.sandboxMode || "workspace-write";
+  const enabledCategories = [];
+
+  if (permissions.terminal) enabledCategories.push("shell");
+  if (permissions.browser) enabledCategories.push("browser");
+  if (permissions.files) enabledCategories.push("filesystem");
+  if (permissions.git) enabledCategories.push("git");
+  if (permissions.delegation) enabledCategories.push("delegation");
+
+  const allowedTools = TOOL_DEFINITIONS.filter((tool) => {
+    if (!enabledCategories.includes(tool.category) && tool.category !== "code" && tool.category !== "http" && tool.category !== "connector") return false;
+    if (sandboxMode === "none" && ["filesystem.write", "shell.exec", "http.request"].includes(tool.name)) return false;
+    if (sandboxMode === "read-only" && ["filesystem.write", "shell.exec", "http.request"].includes(tool.name)) return false;
+    return true;
+  });
+
+  if (allowedTools.length === 0) {
+    return "No tools are currently available. Respond with text only.";
+  }
+
+  const toolDescriptions = allowedTools.map((tool) => {
+    const params = tool.parameters.map((p) => {
+      const req = p.required ? "required" : "optional";
+      const def = p.default !== undefined ? `, default: ${JSON.stringify(p.default)}` : "";
+      return `    "${p.name}": (${p.type}, ${req}${def}) ${p.description || ""}`;
+    }).join(",\n");
+
+    return `  "${tool.name}": ${tool.description}\n  Parameters: {\n${params}\n  }`;
+  }).join("\n\n");
+
+  return [
+    "You have access to the following tools. To use a tool, include a ```json code block in your response with the tool call.",
+    "Format: ```json\n{\"tool\": \"<tool_name>\", \"parameters\": {<parameters>}}\n```",
+    "You MUST wrap your reasoning in a <thought>...</thought> block BEFORE any tool call.",
+    "If you have enough information to answer without tools, just respond normally without a ```json block.",
+    "When you are done and have the final answer, respond with plain text and no tool call.\n",
+    toolDescriptions,
+  ].join("\n\n");
+}
+
+function parseToolCallFromLlmResponse(text) {
+  if (!text) return null;
+
+  const hasThought = /<thought>[\s\S]*?<\/thought>/i.test(text);
+  const hasJsonBlock = /```json\s*/i.test(text);
+
+  if (!hasJsonBlock) return null;
+
+  if (!hasThought) {
+    return { error: "You must provide a <thought> block explaining your reasoning before invoking a tool. Please rewrite your response." };
+  }
+
+  const startMatch = text.match(/```json\s*/i);
+  if (!startMatch) return null;
+
+  const startIndex = startMatch.index + startMatch[0].length;
+  const endMatch = text.lastIndexOf("```");
+
+  if (endMatch === -1 || endMatch <= startIndex) {
+    return { error: "The JSON block must be closed with ```." };
+  }
+
+  const jsonSubstring = text.slice(startIndex, endMatch).trim();
+
+  try {
+    const parsed = JSON.parse(jsonSubstring);
+    if (!parsed.tool || typeof parsed.tool !== "string") {
+      return { error: "Tool call JSON must include a \"tool\" field with the tool name." };
+    }
+    return parsed;
+  } catch {
+    return { error: "JSON.parse failed on the extracted content. Fix the JSON formatting." };
+  }
+}
+
+const activeAgentRuns = new Map();
+
+async function runAgenticLoop(body, request, response) {
+  const agent = body?.agent;
+  const maxIterations = Math.min(Number(body?.maxIterations || 15), 30);
+  const autoApproveSafe = Boolean(body?.autoApproveSafe);
+  const timeoutMs = Number(body?.timeoutMs || 300000);
+
+  if (!agent?.id || !agent?.name || !agent?.provider || !agent?.model) {
+    throw new Error("Agent id, name, provider, and model are required.");
+  }
+
+  const runId = `arun_${randomUUID()}`;
+  const workspace = resolve(agent.workspace || process.cwd());
+  const startedAt = Date.now();
+
+  const runRecord = {
+    id: runId,
+    agentId: agent.id,
+    agentName: agent.name,
+    command: "agentic-loop",
+    cwd: workspace,
+    status: "running",
+    phase: "executing",
+    activity: { kind: "delegation", label: "Agentic Loop", summary: "Autonomous think-act-observe loop" },
+    startedAt: new Date().toISOString(),
+    completedAt: null,
+    durationMs: null,
+    exitCode: null,
+    timedOut: false,
+    stdout: "",
+    stderr: "",
+    error: "",
+    retryCount: 0,
+    maxRetries: maxIterations,
+    parentRunId: null,
+    retryOfRunId: null,
+    model: agent.model,
+    provider: agent.provider,
+    tokenUsage: null,
+    toolCalls: [],
+    artifacts: [],
+  };
+
+  upsertCommandRun(runRecord);
+  activeAgentRuns.set(runId, { canceled: false });
+
+  const toolSchema = buildToolSchemaDescription(agent);
+  const enrichedSystemPrompt = [
+    buildSystemPrompt(agent),
+    "",
+    "---",
+    "",
+    toolSchema,
+  ].join("\n");
+
+  let conversation = normalizeConversation(body.messages || []);
+
+  if (conversationHasImages(conversation) && !modelSupportsVision(agent.provider, agent.model)) {
+    conversation = stripImagesFromConversation(conversation);
+  }
+
+  const hasProfileData = (phase4UserProfile.techStack?.length ?? 0) > 0 || phase4UserProfile.workflowNotes?.trim().length > 0;
+  if (hasProfileData) {
+    const profileBlock = buildPhase4ProfileInjection(phase4UserProfile);
+    const stripped = conversation.filter((m) => !(m.role === "system" && m.content?.startsWith("<!-- digital-twin-profile -->")));
+    conversation = [{ role: "system", content: profileBlock }, ...stripped];
+  }
+
+  const isStreaming = response && !response.headersSent;
+  if (isStreaming) {
+    writeNdjsonHeaders(response);
+  }
+
+  function emit(event) {
+    emitRuntimeEvent(event.type, runId, agent.id, agent.name, event);
+    if (isStreaming) {
+      writeNdjsonEvent(response, { ...event, runId });
+    }
+  }
+
+  emit({ type: "agent_loop:started", phase: "executing", agentId: agent.id, agentName: agent.name, maxIterations });
+
+  let finalText = "";
+  let iteration = 0;
+  let totalTokens = 0;
+  let loopError = null;
+
+  const deadline = Date.now() + timeoutMs;
+
+  try {
+    while (iteration < maxIterations) {
+      iteration++;
+
+      const canceledRun = activeAgentRuns.get(runId);
+      if (canceledRun?.canceled) {
+        loopError = "Agentic loop was canceled by user.";
+        break;
+      }
+
+      if (Date.now() > deadline) {
+        loopError = "Agentic loop timed out.";
+        break;
+      }
+
+      emit({ type: "agent_loop:iteration", phase: "executing", iteration, maxIterations });
+
+      const chatInput = {
+        agent: { ...agent, systemPrompt: enrichedSystemPrompt },
+        messages: conversation,
+      };
+
+      let chatResult;
+      try {
+        chatResult = await runChat(chatInput);
+      } catch (chatErr) {
+        loopError = `LLM call failed at iteration ${iteration}: ${chatErr.message}`;
+        break;
+      }
+
+      if (!chatResult?.text) {
+        loopError = `LLM returned empty response at iteration ${iteration}.`;
+        break;
+      }
+
+      const llmText = chatResult.text;
+      totalTokens += (chatResult.usage?.total_tokens || chatResult.usage?.totalTokens || 0);
+
+      emit({
+        type: "agent_loop:thinking",
+        phase: "executing",
+        iteration,
+        text: llmText.slice(0, 2000),
+        provider: chatResult.provider,
+        usage: chatResult.usage,
+      });
+
+      const parsedToolCall = parseToolCallFromLlmResponse(llmText);
+
+      if (parsedToolCall && parsedToolCall.error) {
+        conversation.push({ role: "assistant", content: llmText });
+        conversation.push({ role: "user", content: `Tool call formatting error: ${parsedToolCall.error}` });
+        emit({ type: "agent_loop:tool_error", phase: "executing", iteration, error: parsedToolCall.error });
+        continue;
+      }
+
+      if (!parsedToolCall) {
+        finalText = llmText;
+        conversation.push({ role: "assistant", content: llmText });
+        emit({ type: "agent_loop:completed", phase: "completed", iteration, finalText: llmText.slice(0, 4000) });
+        break;
+      }
+
+      const toolName = parsedToolCall.tool;
+      const toolParams = parsedToolCall.parameters || {};
+
+      const definition = TOOL_DEFINITIONS.find((t) => t.name === toolName);
+      if (!definition) {
+        conversation.push({ role: "assistant", content: llmText });
+        conversation.push({ role: "user", content: `Unknown tool: "${toolName}". Available tools are defined in your system prompt. Try again.` });
+        emit({ type: "agent_loop:tool_error", phase: "executing", iteration, error: `Unknown tool: ${toolName}` });
+        continue;
+      }
+
+      const approvalCheck = checkToolApprovalNeeded(toolName, toolParams, agent, agent.sandboxMode);
+      if (approvalCheck.blocked) {
+        conversation.push({ role: "assistant", content: llmText });
+        conversation.push({ role: "user", content: `Tool "${toolName}" is blocked: ${approvalCheck.reason}` });
+        emit({ type: "agent_loop:tool_blocked", phase: "executing", iteration, tool: toolName, reason: approvalCheck.reason });
+        continue;
+      }
+
+      if (approvalCheck.needed && !autoApproveSafe) {
+        const approvalRequest = createToolApprovalRequest(
+          toolName,
+          agent.id,
+          agent.name,
+          toolParams,
+          approvalCheck.reasons,
+          approvalCheck.preview,
+        );
+
+        conversation.push({ role: "assistant", content: llmText });
+        emit({
+          type: "agent_loop:approval_required",
+          phase: "waiting_for_approval",
+          iteration,
+          tool: toolName,
+          approvalRequestId: approvalRequest.id,
+          reasons: approvalCheck.reasons,
+          preview: approvalCheck.preview,
+        });
+
+        const approvalResult = await waitForApproval(approvalRequest.id, deadline - Date.now());
+
+        if (approvalResult.action === "reject") {
+          conversation.push({ role: "user", content: `User rejected the tool call "${toolName}". Modify your approach and try again, or respond without using that tool.` });
+          emit({ type: "agent_loop:approval_rejected", phase: "executing", iteration, tool: toolName });
+          continue;
+        }
+
+        if (approvalResult.action === "edit" && approvalResult.editedParameters) {
+          Object.assign(toolParams, approvalResult.editedParameters);
+        }
+
+        emit({ type: "agent_loop:approval_approved", phase: "executing", iteration, tool: toolName });
+      }
+
+      if (approvalCheck.needed && autoApproveSafe && definition.riskLevel === "safe") {
+        emit({ type: "agent_loop:approval_auto_approved", phase: "executing", iteration, tool: toolName });
+      }
+
+      emit({ type: "agent_loop:tool_call", phase: "executing", iteration, tool: toolName, parameters: toolParams });
+
+      let toolResult;
+      try {
+        toolResult = await executeToolInternal(toolName, toolParams, agent, workspace);
+      } catch (toolErr) {
+        toolResult = { ok: false, tool: toolName, error: toolErr.message };
+      }
+
+      const toolCallRecord = {
+        tool: toolName,
+        parameters: toolParams,
+        startedAt: new Date().toISOString(),
+        completedAt: new Date().toISOString(),
+        durationMs: 0,
+        result: toolResult.ok ? "success" : "failure",
+      };
+
+      runRecord.toolCalls = [...(runRecord.toolCalls || []), toolCallRecord];
+
+      const resultSummary = toolResult.ok
+        ? JSON.stringify(toolResult.data || {}, null, 2).slice(0, 6000)
+        : `Error: ${toolResult.error || "Tool execution failed."}`;
+
+      conversation.push({ role: "assistant", content: llmText });
+      conversation.push({ role: "user", content: `[Tool Result: ${toolName}]\n${resultSummary}` });
+
+      emit({
+        type: "agent_loop:tool_result",
+        phase: "executing",
+        iteration,
+        tool: toolName,
+        ok: toolResult.ok,
+        resultPreview: resultSummary.slice(0, 2000),
+      });
+
+      if (iteration >= maxIterations) {
+        finalText = llmText.replace(/```json[\s\S]*?```/g, "").trim() || llmText;
+        emit({ type: "agent_loop:max_iterations", phase: "completed", iteration, finalText: finalText.slice(0, 4000) });
+      }
+    }
+  } catch (err) {
+    loopError = err.message;
+  }
+
+  const finalStatus = loopError ? (activeAgentRuns.get(runId)?.canceled ? "canceled" : "failed") : "completed";
+
+  updateCommandRun(runId, (currentRun) => ({
+    ...currentRun,
+    status: finalStatus,
+    phase: finalStatus,
+    completedAt: new Date().toISOString(),
+    durationMs: Date.now() - startedAt,
+    exitCode: finalStatus === "completed" ? 0 : 1,
+    error: loopError || "",
+    tokenUsage: { totalTokens },
+    toolCalls: runRecord.toolCalls || [],
+  }));
+
+  activeAgentRuns.delete(runId);
+
+  const finalPayload = {
+    ok: finalStatus === "completed",
+    runId,
+    agentId: agent.id,
+    agentName: agent.name,
+    status: finalStatus,
+    iterations: iteration,
+    maxIterations,
+    finalText: finalText || loopError || "",
+    toolCalls: runRecord.toolCalls || [],
+    tokenUsage: { totalTokens },
+    durationMs: Date.now() - startedAt,
+    error: loopError || null,
+  };
+
+  emit({
+    type: finalStatus === "completed" ? "agent_loop:completed" : "agent_loop:failed",
+    phase: finalStatus,
+    ...finalPayload,
+  });
+
+  if (isStreaming) {
+    writeNdjsonEvent(response, { type: "completed", ...finalPayload });
+    response.end();
+  }
+
+  return finalPayload;
+}
+
+function waitForApproval(approvalId, timeoutMs) {
+  return new Promise((resolve) => {
+    const deadline = Date.now() + Math.min(timeoutMs || 600000, 600000);
+    const interval = setInterval(() => {
+      const approval = toolApprovalRequests.get(approvalId);
+      if (!approval) {
+        clearInterval(interval);
+        resolve({ action: "reject" });
+        return;
+      }
+
+      if (approval._resolved) {
+        clearInterval(interval);
+        resolve(approval._resolution || { action: "reject" });
+        return;
+      }
+
+      if (Date.now() > deadline) {
+        clearInterval(interval);
+        toolApprovalRequests.delete(approvalId);
+        resolve({ action: "reject" });
+      }
+    }, 1000);
+  });
+}
+
 const server = createServer(async (request, response) => {
   if (!request.url) {
     sendJson(response, 400, { error: "Missing request URL" });
@@ -5535,6 +5940,89 @@ const server = createServer(async (request, response) => {
       const runId = decodeURIComponent(url.pathname.slice("/v1/runs/".length, -"/resume".length));
       const result = resumeCommandRun(runId);
       sendJson(response, result.statusCode || 200, result);
+      return;
+    }
+
+    if (request.method === "POST" && url.pathname === "/v1/agent/run") {
+      const body = await readJson(request);
+      try {
+        const result = await runAgenticLoop(body, null, null);
+        sendJson(response, 200, result);
+      } catch (error) {
+        sendJson(response, 500, {
+          ok: false,
+          error: error instanceof Error ? error.message : "Agentic loop failed.",
+        });
+      }
+      return;
+    }
+
+    if (request.method === "POST" && url.pathname === "/v1/agent/run/stream") {
+      const body = await readJson(request);
+      try {
+        await runAgenticLoop(body, request, response);
+      } catch (error) {
+        if (!response.headersSent) {
+          sendJson(response, 500, {
+            ok: false,
+            error: error instanceof Error ? error.message : "Agentic loop stream failed.",
+          });
+        } else {
+          writeNdjsonEvent(response, {
+            type: "error",
+            error: error instanceof Error ? error.message : "Agentic loop stream failed.",
+          });
+          response.end();
+        }
+      }
+      return;
+    }
+
+    if (request.method === "POST" && url.pathname.match(/^\/v1\/agent\/runs\/[^/]+\/cancel$/)) {
+      const runId = decodeURIComponent(url.pathname.slice("/v1/agent/runs/".length, -"/cancel".length));
+      const activeRun = activeAgentRuns.get(runId);
+      if (!activeRun) {
+        sendJson(response, 404, { ok: false, error: "Agent run not found or already completed." });
+        return;
+      }
+      activeRun.canceled = true;
+      sendJson(response, 200, { ok: true, runId, status: "canceled" });
+      return;
+    }
+
+    if (request.method === "POST" && url.pathname.match(/^\/v1\/tools\/approvals\/[^/]+$/) && url.searchParams.has("agentLoop")) {
+      const approvalId = decodeURIComponent(url.pathname.slice("/v1/tools/approvals/".length));
+      const body = await readJson(request);
+      const action = body.action || "approve";
+
+      const approval = toolApprovalRequests.get(approvalId);
+      if (!approval) {
+        sendJson(response, 404, { ok: false, error: "Approval request not found or expired." });
+        return;
+      }
+
+      if (new Date(approval.expiresAt) < new Date()) {
+        toolApprovalRequests.delete(approvalId);
+        sendJson(response, 400, { ok: false, error: "Approval request has expired." });
+        return;
+      }
+
+      if (action === "reject") {
+        approval._resolved = true;
+        approval._resolution = { action: "reject" };
+        toolApprovalRequests.delete(approvalId);
+        sendJson(response, 200, { ok: true, action: "rejected" });
+        return;
+      }
+
+      approval._resolved = true;
+      approval._resolution = {
+        action,
+        editedParameters: action === "edit" ? body.editedParameters : null,
+      };
+      toolApprovalRequests.delete(approvalId);
+
+      sendJson(response, 200, { ok: true, action: "approved" });
       return;
     }
 

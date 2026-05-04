@@ -14,4 +14,7 @@ supabase/functions/.env
 supabase/functions/.env.local
 .vercel
 .copilot-session.json
+.connector-sessions.json
+.automations-store.json
 tmp
+*.zip

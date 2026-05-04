@@ -176,6 +176,7 @@ export async function invokeToolStream(
             approvalRequired: true,
             approvalRequestId: event.approvalRequestId,
             approvalReasons: event.reasons,
+            preview: event.preview,
           };
         }
       }
@@ -197,6 +198,7 @@ export async function invokeToolStream(
           approvalRequired: true,
           approvalRequestId: event.approvalRequestId,
           approvalReasons: event.reasons,
+          preview: event.preview,
         };
       }
     }

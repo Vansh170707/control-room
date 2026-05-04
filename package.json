@@ -5,6 +5,8 @@
   "type": "module",
   "scripts": {
     "agent:heartbeat": "node scripts/openclaw-agent.mjs heartbeat",
+    "agent:cloud": "node scripts/openclaw-agent.mjs poll",
+    "agent:all": "node scripts/start-all-openclaw.mjs",
     "agent:poll": "node scripts/openclaw-agent.mjs poll",
     "agent:run": "node scripts/openclaw-agent.mjs run",
     "runtime:dev": "node scripts/agent-runtime-server.mjs",

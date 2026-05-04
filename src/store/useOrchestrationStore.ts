@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import { persist } from "zustand/middleware";
+import { createJSONStorage, persist, type StateStorage } from "zustand/middleware";
 import type {
   CircuitBreakerEvent,
   ContextPackage,
@@ -42,6 +42,39 @@ interface OrchestrationState {
     toolDrafts?: ToolDraft[];
   }) => void;
 }
+
+const safeLocalStorage: StateStorage = {
+  getItem: (name) => {
+    if (typeof window === "undefined") {
+      return null;
+    }
+
+    return window.localStorage.getItem(name);
+  },
+  setItem: (name, value) => {
+    if (typeof window === "undefined") {
+      return;
+    }
+
+    try {
+      window.localStorage.setItem(name, value);
+    } catch (error) {
+      console.warn(`Skipping ${name} persistence after storage quota error.`, error);
+      try {
+        window.localStorage.removeItem(name);
+      } catch {
+        // Ignore cleanup failures; persistence is best-effort.
+      }
+    }
+  },
+  removeItem: (name) => {
+    if (typeof window === "undefined") {
+      return;
+    }
+
+    window.localStorage.removeItem(name);
+  },
+};
 
 export const useOrchestrationStore = create<OrchestrationState>()(
   persist(
@@ -163,14 +196,17 @@ export const useOrchestrationStore = create<OrchestrationState>()(
     }),
     {
       name: "orchestration-store",
+      storage: createJSONStorage(() => safeLocalStorage),
       partialize: (state) => ({
         dispatcherDecisions: state.dispatcherDecisions.slice(0, 20),
-        contextPackagesByAgent: state.contextPackagesByAgent,
+        contextPackagesByAgent: {},
         taskTrees: state.taskTrees.slice(0, 12),
         verifierReviews: state.verifierReviews.slice(0, 20),
-        planReviews: state.planReviews.slice(0, 12),
+        planReviews: state.planReviews
+          .filter((review) => review.status !== "pending")
+          .slice(0, 12),
         circuitBreakerEvents: state.circuitBreakerEvents.slice(0, 12),
-        knowledgeGraphByAgent: state.knowledgeGraphByAgent,
+        knowledgeGraphByAgent: {},
         toolDrafts: state.toolDrafts.slice(0, 12),
       }),
     },

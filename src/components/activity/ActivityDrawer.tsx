@@ -1,6 +1,6 @@
-import React, { useEffect, useRef } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { motion } from "framer-motion";
-import { List, Server, Settings2, Terminal, X } from "lucide-react";
+import { CalendarDays, List, Server, Settings2, X } from "lucide-react";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
 import { cn } from "@/lib/utils";
@@ -36,7 +36,15 @@ export function ActivityDrawer({ legacyProps }: { legacyProps: any }) {
     browserSessions,
     setActiveBrowserSessionId,
     activeBrowserSessionId,
-    commandError
+    commandError,
+    allAgents,
+    automations,
+    automationRunsById,
+    automationError,
+    isCreatingActivityAutomation,
+    handleCreateActivityAutomation,
+    handleTriggerAutomation,
+    isTriggeringAutomationId
   } = legacyProps;
 
   const isActivityDrawerOpen = useAppStore(s => s.isActivityDrawerOpen);
@@ -46,6 +54,37 @@ export function ActivityDrawer({ legacyProps }: { legacyProps: any }) {
   const activityDrawerTab = useAppStore(s => s.activityDrawerTab);
   const setActivityDrawerTab = useAppStore(s => s.setActivityDrawerTab);
   const isResizingRef = useRef(false);
+  const formatLocalDateInput = (date: Date) => {
+    const year = date.getFullYear();
+    const month = String(date.getMonth() + 1).padStart(2, "0");
+    const day = String(date.getDate()).padStart(2, "0");
+    return `${year}-${month}-${day}`;
+  };
+  const today = new Date();
+  const nextHour = new Date(today.getTime() + 60 * 60 * 1000);
+  const defaultTime = `${String(nextHour.getHours()).padStart(2, "0")}:${String(nextHour.getMinutes()).padStart(2, "0")}`;
+  const [automationAgentId, setAutomationAgentId] = useState(selectedAgent?.id ?? "");
+  const [automationName, setAutomationName] = useState("");
+  const [automationTask, setAutomationTask] = useState("");
+  const [automationFrequency, setAutomationFrequency] = useState<"once" | "daily" | "hourly">("daily");
+  const [automationDate, setAutomationDate] = useState(formatLocalDateInput(nextHour));
+  const [automationTime, setAutomationTime] = useState(defaultTime);
+
+  useEffect(() => {
+    if (selectedAgent && !automationAgentId) {
+      setAutomationAgentId(selectedAgent.id);
+    }
+  }, [automationAgentId, selectedAgent]);
+
+  const selectedAutomationAgent =
+    (allAgents ?? []).find((agent: any) => agent.id === automationAgentId) ??
+    selectedAgent ??
+    null;
+  const visibleAutomations = useMemo(() => {
+    const source = automations ?? [];
+    if (!selectedAutomationAgent) return source;
+    return source.filter((automation: any) => automation.agentId === selectedAutomationAgent.id);
+  }, [automations, selectedAutomationAgent]);
 
   useEffect(() => {
     const handleMouseMove = (event: MouseEvent) => {
@@ -147,7 +186,7 @@ export function ActivityDrawer({ legacyProps }: { legacyProps: any }) {
               </button>
             </div>
             <div className="mt-5 flex items-center gap-5 border-t border-[#e0d2c0] pt-3 text-[11px]">
-              {(["activity", "files", "terminal", "browser"] as const).map(
+              {(["activity", "files", "terminal", "browser", "automations"] as const).map(
                 (tab) => (
                   <button
                     key={tab}
@@ -477,8 +516,23 @@ export function ActivityDrawer({ legacyProps }: { legacyProps: any }) {
                           sandbox="allow-scripts allow-same-origin allow-forms allow-popups"
                         />
                         {activeBrowserSession.task && (
-                          <div className="border-t border-[#e0d2c0] px-3 py-2 text-[11px] text-[#7d6b5a] truncate">
-                            Task: {activeBrowserSession.task}
+                          <div className="border-t border-[#e0d2c0] px-3 py-2 text-[11px] text-[#7d6b5a]">
+                            <p className="truncate">Task: {activeBrowserSession.task}</p>
+                            {activeBrowserSession.totalCostUsd && (
+                              <p className="mt-1 text-[10px] text-[#9a8978]">
+                                Cost: {activeBrowserSession.totalCostUsd}
+                              </p>
+                            )}
+                          </div>
+                        )}
+                        {activeBrowserSession.output && (
+                          <div className="border-t border-[#e0d2c0] bg-[#fbf7ef] px-3 py-2">
+                            <p className="mb-1 text-[10px] uppercase tracking-wider text-[#8f7b66]">
+                              Result
+                            </p>
+                            <p className="max-h-28 overflow-auto whitespace-pre-wrap text-[11px] leading-relaxed text-[#4c4035]">
+                              {activeBrowserSession.output}
+                            </p>
                           </div>
                         )}
                       </div>
@@ -533,6 +587,11 @@ export function ActivityDrawer({ legacyProps }: { legacyProps: any }) {
                                   Agent: {session.agentName}
                                 </p>
                               )}
+                              {session.output && (
+                                <p className="mt-1 line-clamp-2 text-[10px] leading-relaxed text-[#7d6b5a]">
+                                  {session.output}
+                                </p>
+                              )}
                             </button>
                           ))}
                         </div>
@@ -547,6 +606,206 @@ export function ActivityDrawer({ legacyProps }: { legacyProps: any }) {
                         Browser Use.
                       </div>
                     )}
+                  </div>
+                )}
+
+                {activityDrawerTab === "automations" && (
+                  <div className="space-y-3">
+                    <div className="claude-activity-card rounded-xl border border-[#e0d2c0] bg-[#fffaf2] p-3">
+                      <div className="mb-3 flex items-center justify-between gap-3">
+                        <div>
+                          <p className="text-[11px] uppercase tracking-wider text-[#8f7b66]">
+                            Schedule agent work
+                          </p>
+                          <p className="mt-1 text-[12px] leading-relaxed text-[#7d6b5a]">
+                            Pick an agent, choose when it should run, and tell it what to do.
+                          </p>
+                        </div>
+                        <CalendarDays className="h-4 w-4 text-[#c96437]" />
+                      </div>
+
+                      <form
+                        className="space-y-3"
+                        onSubmit={(event) => {
+                          event.preventDefault();
+                          if (!selectedAutomationAgent || !automationTask.trim()) return;
+                          void handleCreateActivityAutomation({
+                            agentId: selectedAutomationAgent.id,
+                            name: automationName.trim(),
+                            task: automationTask.trim(),
+                            frequency: automationFrequency,
+                            date: automationDate,
+                            time: automationTime,
+                          }).then((result: any) => {
+                            if (result?.ok) {
+                              setAutomationName("");
+                              setAutomationTask("");
+                            }
+                          });
+                        }}
+                      >
+                        <div>
+                          <label className="mb-1 block text-[11px] text-[#8f7b66]">
+                            Agent
+                          </label>
+                          <select
+                            value={automationAgentId || selectedAgent?.id || ""}
+                            onChange={(event) => setAutomationAgentId(event.target.value)}
+                            className="h-9 w-full rounded-md border border-[#d7c8b7] bg-[#fbf7ef] px-2.5 text-[12px] text-[#2f261f] outline-none focus:ring-2 focus:ring-[#c96437]/20"
+                          >
+                            {(allAgents ?? []).map((agent: any) => (
+                              <option key={agent.id} value={agent.id}>
+                                {agent.emoji} {agent.name} · {agent.model}
+                              </option>
+                            ))}
+                          </select>
+                        </div>
+
+                        <div className="grid grid-cols-2 gap-2">
+                          <div>
+                            <label className="mb-1 block text-[11px] text-[#8f7b66]">
+                              Frequency
+                            </label>
+                            <select
+                              value={automationFrequency}
+                              onChange={(event) =>
+                                setAutomationFrequency(event.target.value as "once" | "daily" | "hourly")
+                              }
+                              className="h-9 w-full rounded-md border border-[#d7c8b7] bg-[#fbf7ef] px-2.5 text-[12px] text-[#2f261f] outline-none focus:ring-2 focus:ring-[#c96437]/20"
+                            >
+                              <option value="once">Once</option>
+                              <option value="daily">Every day</option>
+                              <option value="hourly">Every hour</option>
+                            </select>
+                          </div>
+                          <div>
+                            <label className="mb-1 block text-[11px] text-[#8f7b66]">
+                              Time
+                            </label>
+                            <input
+                              type="time"
+                              value={automationTime}
+                              onChange={(event) => setAutomationTime(event.target.value)}
+                              className="h-9 w-full rounded-md border border-[#d7c8b7] bg-[#fbf7ef] px-2.5 text-[12px] text-[#2f261f] outline-none focus:ring-2 focus:ring-[#c96437]/20"
+                            />
+                          </div>
+                        </div>
+
+                        {automationFrequency === "once" ? (
+                          <div>
+                            <label className="mb-1 block text-[11px] text-[#8f7b66]">
+                              Date
+                            </label>
+                            <input
+                              type="date"
+                              value={automationDate}
+                              onChange={(event) => setAutomationDate(event.target.value)}
+                              className="h-9 w-full rounded-md border border-[#d7c8b7] bg-[#fbf7ef] px-2.5 text-[12px] text-[#2f261f] outline-none focus:ring-2 focus:ring-[#c96437]/20"
+                            />
+                          </div>
+                        ) : null}
+
+                        <div>
+                          <label className="mb-1 block text-[11px] text-[#8f7b66]">
+                            Automation name
+                          </label>
+                          <input
+                            value={automationName}
+                            onChange={(event) => setAutomationName(event.target.value)}
+                            placeholder="Daily project check"
+                            className="h-9 w-full rounded-md border border-[#d7c8b7] bg-[#fbf7ef] px-2.5 text-[12px] text-[#2f261f] placeholder-[#9a8978] outline-none focus:ring-2 focus:ring-[#c96437]/20"
+                          />
+                        </div>
+
+                        <div>
+                          <label className="mb-1 block text-[11px] text-[#8f7b66]">
+                            What should the agent do?
+                          </label>
+                          <textarea
+                            value={automationTask}
+                            onChange={(event) => setAutomationTask(event.target.value)}
+                            placeholder="Example: check my project status, summarize blockers, and tell me the next action."
+                            className="min-h-[96px] w-full resize-none rounded-md border border-[#d7c8b7] bg-[#fbf7ef] px-2.5 py-2 text-[12px] text-[#2f261f] placeholder-[#9a8978] outline-none focus:ring-2 focus:ring-[#c96437]/20"
+                          />
+                        </div>
+
+                        {automationError ? (
+                          <p className="rounded-md border border-[#d77b62]/35 bg-[#c96437]/10 px-2.5 py-2 text-[11px] text-[#9a4f2c]">
+                            {automationError}
+                          </p>
+                        ) : null}
+
+                        <button
+                          type="submit"
+                          disabled={
+                            isCreatingActivityAutomation ||
+                            !selectedAutomationAgent ||
+                            !automationTask.trim()
+                          }
+                          className="inline-flex h-9 w-full items-center justify-center rounded-md border border-[#c96437]/30 bg-[#c96437]/12 px-3 text-[12px] font-medium text-[#8f4b2d] transition-colors hover:bg-[#c96437]/18 disabled:cursor-not-allowed disabled:opacity-50"
+                        >
+                          {isCreatingActivityAutomation ? "Creating automation..." : "Create Automation"}
+                        </button>
+                      </form>
+                    </div>
+
+                    <div className="claude-activity-card overflow-hidden rounded-xl border border-[#e0d2c0] bg-[#fffaf2]">
+                      <div className="claude-activity-card-header flex items-center justify-between border-b border-[#e0d2c0] px-3 py-2">
+                        <span className="text-[11px] uppercase tracking-wider text-[#8f7b66]">
+                          Scheduled for {selectedAutomationAgent?.name ?? "agent"}
+                        </span>
+                        <span className="text-[10px] text-[#9a8978]">
+                          {visibleAutomations.length}
+                        </span>
+                      </div>
+                      {visibleAutomations.length > 0 ? (
+                        <div className="divide-y divide-[#eadfce]">
+                          {visibleAutomations.slice(0, 8).map((automation: any) => {
+                            const latestRun = automationRunsById?.[automation.id]?.[0] ?? null;
+                            const cron = automation.trigger?.config?.cron;
+                            const runAt = automation.trigger?.config?.runAt;
+                            return (
+                              <div key={automation.id} className="px-3 py-3">
+                                <div className="flex items-start justify-between gap-3">
+                                  <div className="min-w-0">
+                                    <p className="truncate text-[13px] font-medium text-[#2f261f]">
+                                      {automation.name}
+                                    </p>
+                                    <p className="mt-1 text-[11px] text-[#8f7b66]">
+                                      {runAt
+                                        ? `Once · ${new Date(runAt).toLocaleString()}`
+                                        : cron
+                                          ? `Schedule · ${cron}`
+                                          : automation.trigger?.type}
+                                    </p>
+                                    <p className="mt-1 line-clamp-2 text-[11px] leading-relaxed text-[#7d6b5a]">
+                                      {automation.action?.payload?.message ?? "Scheduled agent task"}
+                                    </p>
+                                    {latestRun ? (
+                                      <p className="mt-1 text-[10px] text-[#9a8978]">
+                                        Last run: {latestRun.status}
+                                      </p>
+                                    ) : null}
+                                  </div>
+                                  <button
+                                    type="button"
+                                    disabled={isTriggeringAutomationId === automation.id}
+                                    onClick={() => void handleTriggerAutomation(automation.id)}
+                                    className="shrink-0 rounded-md border border-[#d7c8b7] bg-[#fbf7ef] px-2.5 py-1.5 text-[11px] text-[#8f4b2d] hover:bg-[#f7efe3] disabled:opacity-50"
+                                  >
+                                    {isTriggeringAutomationId === automation.id ? "Running..." : "Run"}
+                                  </button>
+                                </div>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      ) : (
+                        <div className="px-3 py-5 text-[12px] leading-relaxed text-[#7d6b5a]">
+                          No automations for this agent yet. Create one above.
+                        </div>
+                      )}
+                    </div>
                   </div>
                 )}
 

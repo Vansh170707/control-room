@@ -10,8 +10,8 @@ interface AppState {
   setIsActivityDrawerOpen: (isOpen: boolean) => void;
   activityPanelWidth: number;
   setActivityPanelWidth: (width: number) => void;
-  activityDrawerTab: "activity" | "files" | "terminal" | "browser";
-  setActivityDrawerTab: (tab: "activity" | "files" | "terminal" | "browser") => void;
+  activityDrawerTab: "activity" | "files" | "terminal" | "browser" | "automations";
+  setActivityDrawerTab: (tab: "activity" | "files" | "terminal" | "browser" | "automations") => void;
   isCreateAgentOpen: boolean;
   setIsCreateAgentOpen: (isOpen: boolean) => void;
   editingAgentId: string | null;

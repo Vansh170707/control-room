@@ -8,3 +8,6 @@ verify_jwt = false
 
 [functions.issue-command]
 verify_jwt = false
+
+[functions.command-status]
+verify_jwt = false

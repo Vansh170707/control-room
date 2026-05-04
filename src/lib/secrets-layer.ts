@@ -1,4 +1,4 @@
-export type SecretProvider = "openai" | "anthropic" | "gemini" | "groq" | "openrouter" | "github" | "copilot" | "custom";
+export type SecretProvider = "openai" | "anthropic" | "gemini" | "groq" | "nvidia" | "openrouter" | "github" | "copilot" | "custom";
 
 export type SecretStatus = "active" | "expired" | "invalid" | "unconfigured" | "refreshing";
 
@@ -244,6 +244,7 @@ export function getProviderDisplayName(provider: SecretProvider): string {
     anthropic: "Anthropic",
     gemini: "Google Gemini",
     groq: "Groq",
+    nvidia: "NVIDIA NIM",
     openrouter: "OpenRouter",
     github: "GitHub Models",
     copilot: "GitHub Copilot",
