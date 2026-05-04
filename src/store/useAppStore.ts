@@ -1,7 +1,7 @@
 import { create } from "zustand";
 import type { WorkspaceView } from "../App";
 
-interface AppState {
+export interface AppState {
   workspaceView: WorkspaceView;
   setWorkspaceView: (view: WorkspaceView) => void;
   sidebarWidth: number;

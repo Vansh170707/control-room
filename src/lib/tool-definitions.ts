@@ -6,6 +6,7 @@ export type ToolName =
   | "gmail.send"
   | "filesystem.read"
   | "filesystem.write"
+  | "filesystem.edit"
   | "filesystem.list"
   | "code.search"
   | "git.status"
@@ -185,6 +186,22 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
     responseShape: { type: "object", properties: { path: "string", created: "boolean", bytesWritten: "number" } },
   },
   {
+    name: "filesystem.edit",
+    category: "filesystem",
+    description: "Edit an existing file using exact find/replace blocks or a unified diff.",
+    riskLevel: "high",
+    requiresApproval: true,
+    parameters: [
+      { name: "path", type: "string", required: true, description: "File path relative to the workspace root." },
+      { name: "find", type: "string", required: false, description: "Exact text to replace. Use with replace for targeted edits." },
+      { name: "replace", type: "string", required: false, description: "Replacement text for find/replace edits." },
+      { name: "content", type: "string", required: false, description: "Full file content or a unified diff if patch is true." },
+      { name: "patch", type: "boolean", required: false, description: "If true, treat content as a unified diff.", default: false },
+      { name: "createIfMissing", type: "boolean", required: false, description: "If true, create the file when missing.", default: false },
+    ],
+    responseShape: { type: "object", properties: { path: "string", updated: "boolean", bytesWritten: "number", diff: "string" } },
+  },
+  {
     name: "filesystem.list",
     category: "filesystem",
     description: "List files and directories in a workspace path.",
@@ -314,9 +331,9 @@ export function isToolAllowedForSandboxMode(
   }
 
   const writeTools: ToolName[] = ["filesystem.write", "shell.exec", "http.request"];
-  if (sandboxMode === "read-only" && writeTools.includes(tool)) {
-    return false;
-  }
+    if (sandboxMode === "read-only" && writeTools.includes(tool)) {
+      return false;
+    }
 
   return true;
 }

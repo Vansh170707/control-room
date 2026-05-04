@@ -23,6 +23,7 @@ import { ApprovalQueue } from "@/components/chat/ApprovalQueue";
 import { DigitalTwinPanel } from "@/components/inspector/DigitalTwinPanel";
 import { ReflectionPanel } from "@/components/inspector/ReflectionPanel";
 import { TrustPolicyEditor } from "@/components/inspector/TrustPolicyEditor";
+import type { AgentConnectorKey } from "@/types";
 import type {
   WorkspaceAgent,
   RuntimeHealth,
@@ -55,9 +56,9 @@ interface AccountsViewProps {
   handleStartConnectorOAuth: (provider: string) => Promise<void>;
   handleSaveConnectorToken: (provider: string) => Promise<void>;
   handleDisconnectConnector: (provider: string) => Promise<void>;
-  handleEnableConnectorForAllAgents: (connectorKey: string) => void;
+  handleEnableConnectorForAllAgents: (connectorKey: AgentConnectorKey) => void;
   refreshConnectorAuth: () => Promise<void>;
-  refreshRuntimeHealth: () => Promise<void>;
+  refreshRuntimeHealth: () => void;
   refreshAutomations: () => Promise<void>;
   handleTriggerAutomation: (automationId: string) => Promise<void>;
 }

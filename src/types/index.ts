@@ -6,6 +6,9 @@ import type { Agent, AgentStatus } from "@/data/mock-data";
 import type { RuntimeArtifact } from "@/lib/agent-runtime";
 import type { ToolApprovalRequest } from "@/lib/tool-definitions";
 import type { Database } from "@/lib/supabase-types";
+import type { Automation, AutomationRun } from "@/lib/automations";
+import type { RuntimeHealth } from "@/lib/agent-runtime";
+import type { CouncilSession } from "@/data/mock-data";
 
 // ── Scalar union types ───────────────────────────────────────────────
 
@@ -58,6 +61,8 @@ export type ActivityKind =
 export type ChannelStatus = "active" | "blocked" | "done";
 export type ChannelMessageKind = "message" | "task" | "handoff" | "result" | "system";
 export type PresenceTone = "running" | "review" | "error" | "idle";
+
+export type { RuntimeHealth, Automation, AutomationRun, CouncilSession };
 
 // ── Interfaces ───────────────────────────────────────────────────────
 

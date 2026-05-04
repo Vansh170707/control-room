@@ -25,6 +25,7 @@ import type {
   PresenceTone,
   WorkspaceAgent,
 } from "@/types";
+import type { AppState } from "@/store/useAppStore";
 import { delegationMeta, executionModeMeta } from "@/constants";
 
 interface ChannelPresence {
@@ -36,7 +37,7 @@ interface ChannelPresence {
 }
 
 interface ChannelStatusMeta {
-  badgeVariant: string;
+  badgeVariant: "default" | "emerald" | "cyan" | "amber" | "danger" | "muted";
   label: string;
 }
 
@@ -55,14 +56,14 @@ interface ChannelsViewProps {
   handleSendChannelMessage: (event: React.FormEvent<HTMLFormElement>) => void;
   ingestComposerFiles: (fileList: FileList | File[], target: "chat" | "channel") => Promise<void>;
   removeDraftAttachment: (target: "chat" | "channel", attachmentId: string) => void;
-  channelFileInputRef: RefObject<HTMLInputElement | null>;
+  channelFileInputRef: RefObject<HTMLInputElement>;
   channelMentionCandidates: WorkspaceAgent[];
   attachmentLibrary: Record<string, ComposerAttachment>;
   selectedChannelDelegations: DelegationTask[];
   updateChannelMemberTarget: (channelId: string, agentId: string, value: string) => void;
   allAgents: WorkspaceAgent[];
   setSelectedAgentId: (id: string) => void;
-  setActivityDrawerTab: (tab: string) => void;
+  setActivityDrawerTab: AppState["setActivityDrawerTab"];
   setIsActivityDrawerOpen: (open: boolean) => void;
 }
 

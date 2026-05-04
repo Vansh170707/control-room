@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { executeAgentLoopStream } from "@/lib/agent-runtime";
 import { AnimatePresence, motion } from "framer-motion";
 import {
   Activity,
@@ -7163,401 +7164,79 @@ function App() {
         githubModelsReady: Boolean(runtimeHealth.providers?.githubModels),
       });
       const memoryContext = preloadedMemoryContext;
-      const executionContextMessages: ChatMessage[] = [];
-      const executionSteps: ExecutionStepResult[] = [];
-      let finalReasoning = "";
-      let loopBlocked = false;
-      const seenCommands = new Set<string>();
+            let loopError: string | null = null;
+      let finalSummaryText = "";
 
-      if (
-        !messageHasImageInput &&
-        shouldConsiderSandboxExecution(expandedPrompt)
-      ) {
-        const deterministicPlan = buildDeterministicLocalCommand(
-          expandedPrompt,
-          previousThread,
-        );
-        if (deterministicPlan) {
-          updateLiveActivity(thinkingActivityId, (entry) => ({
-            ...entry,
-            status: "running",
-            detail: deterministicPlan.reasoning,
-            timestamp: new Date().toISOString(),
-          }));
-
-          const commandExecution = await handleCommandExecutionRequest({
-            agent: selectedAgentSnapshot,
-            command: deterministicPlan.command,
-            cwd: deterministicPlan.cwd,
-            source: "agent",
-          });
-
-          if (commandExecution.status === "waiting_for_approval") {
-            updateLiveActivity(thinkingActivityId, (entry) => ({
-              ...entry,
-              status: "idle",
-              detail: "Waiting for approval before running the local command.",
-              timestamp: new Date().toISOString(),
-            }));
-            finishReplyingForAgent();
-            return;
-          }
-
-          if (commandExecution.status === "queued") {
-            const queuedMessage =
-              commandExecution.result.error ||
-              "I queued the command on your local bridge. I’ll wait for the bridge activity/output before claiming it finished.";
-            updateLiveActivity(thinkingActivityId, (entry) => ({
-              ...entry,
-              status: "idle",
-              detail: "Command queued on local bridge",
-              timestamp: new Date().toISOString(),
-            }));
-            await streamAssistantReply({
-              agent: selectedAgentSnapshot,
-              text: queuedMessage,
-              previousThread,
-            });
-            finishReplyingForAgent();
-            return;
-          }
-
-          if (commandExecution.status === "blocked") {
-            const blockedMessage =
-              "I couldn't run that local command because it was blocked before execution.";
-            updateLiveActivity(thinkingActivityId, (entry) => ({
-              ...entry,
-              status: "failed",
-              detail: blockedMessage,
-              timestamp: new Date().toISOString(),
-            }));
-            await streamAssistantReply({
-              agent: selectedAgentSnapshot,
-              text: blockedMessage,
-              previousThread,
-            });
-            finishReplyingForAgent();
-            return;
-          }
-
-          const replyText = formatDeterministicCommandReply({
-            plan: deterministicPlan,
-            result: commandExecution.result,
-          });
-
-          await streamAssistantReply({
-            agent: selectedAgentSnapshot,
-            text: replyText,
-            previousThread,
-          });
-
-          updateTaskTree(taskTree.id, (current) => ({
-            ...current,
-            status: commandExecution.result.ok ? "completed" : "blocked",
-            finalSummary: replyText,
-            updatedAt: new Date().toISOString(),
-            nodes: current.nodes.map((node) => ({
-              ...node,
-              status: commandExecution.result.ok ? "completed" : "blocked",
-              updatedAt: new Date().toISOString(),
-            })),
-          }));
-
-          finishReplyingForAgent();
-          return;
-        }
-
-        for (let stepIndex = 0; stepIndex < 4; stepIndex += 1) {
-          const executionPlan = await planAgentExecution(
-            selectedAgentSnapshot,
-            expandedPrompt,
-            [...previousThread, userMessage, ...executionContextMessages],
-          );
-
-          if (!(executionPlan?.mode === "command" && executionPlan.command)) {
-            finalReasoning = executionPlan?.reasoning || finalReasoning;
-            updateLiveActivity(thinkingActivityId, (entry) => ({
-              ...entry,
-              status: "completed",
-              detail:
-                executionPlan?.reasoning || "Continuing with a direct reply.",
-              timestamp: new Date().toISOString(),
-            }));
-            break;
-          }
-
-          const commandSignature = `${executionPlan.cwd || selectedAgentSnapshot.workspace || ""}::${executionPlan.command}`;
-          if (seenCommands.has(commandSignature)) {
-            finalReasoning =
-              "Execution stopped because the same sandbox action was suggested again.";
-            const breaker = detectCircuitBreakerEvent({
-              agentId: selectedAgentSnapshot.id,
-              handoffCount: 0,
-              repeatedCommandCount: 2,
-              failureCount: 0,
-            });
-            if (breaker) {
-              addCircuitBreakerEvent(breaker);
+      try {
+        await executeAgentLoopStream(
+          {
+            agent: runtimeChatAgent,
+            messages: [
+              ...memoryContext.runtimeMessages,
+              ...toRuntimeConversation(
+                [...previousThread, userMessage],
+                attachmentLibrary,
+              ),
+              ...browserContextMessages,
+            ],
+            maxIterations: 15,
+          },
+          (event: any) => {
+            if (event.type === "agent_loop:started") {
+              updateLiveActivity(thinkingActivityId, (entry) => ({
+                ...entry,
+                status: "running",
+                detail: "Starting autonomous execution...",
+                timestamp: new Date().toISOString(),
+              }));
+              updateTaskTree(taskTree.id, (current) => ({
+                ...current,
+                status: "running",
+                updatedAt: new Date().toISOString(),
+                nodes: current.nodes.map((node) =>
+                  node.kind === "execution" || node.kind === "analysis"
+                    ? { ...node, status: "running", updatedAt: new Date().toISOString() }
+                    : node,
+                ),
+              }));
+            } else if (event.type === "agent_loop:thinking") {
+              updateLiveActivity(thinkingActivityId, (entry) => ({
+                ...entry,
+                status: "running",
+                detail: "Thinking...",
+                timestamp: new Date().toISOString(),
+              }));
+            } else if (event.type === "agent_loop:tool_call" && event.tool) {
+              updateLiveActivity(thinkingActivityId, (entry) => ({
+                ...entry,
+                status: "running",
+                detail: `Using tool ${event.tool}...`,
+                timestamp: new Date().toISOString(),
+              }));
+            } else if (event.type === "agent_loop:approval_required" && event.tool) {
+              updateLiveActivity(thinkingActivityId, (entry) => ({
+                ...entry,
+                status: "idle",
+                detail: `Waiting for approval on tool ${event.tool}...`,
+                timestamp: new Date().toISOString(),
+              }));
+            } else if (event.type === "agent_loop:completed") {
+              finalSummaryText = event.text || "Execution completed.";
+            } else if (event.type === "error") {
+              loopError = event.error || "Unknown error occurred during execution stream.";
             }
-            updateTaskTree(taskTree.id, (current) => ({
-              ...current,
-              status: "blocked",
-              updatedAt: new Date().toISOString(),
-            }));
-            updateLiveActivity(thinkingActivityId, (entry) => ({
-              ...entry,
-              status: "completed",
-              detail: finalReasoning,
-              timestamp: new Date().toISOString(),
-            }));
-            break;
           }
-
-          seenCommands.add(commandSignature);
-          updateLiveActivity(thinkingActivityId, (entry) => ({
-            ...entry,
-            status: "running",
-            detail: `Working through sandbox step ${stepIndex + 1}: ${executionPlan.command}`,
-            timestamp: new Date().toISOString(),
-          }));
-
-          const commandExecution = await handleCommandExecutionRequest({
-            agent: selectedAgentSnapshot,
-            command: executionPlan.command,
-            cwd: executionPlan.cwd || selectedAgentSnapshot.workspace || "",
-            source: "agent",
-          });
-
-          if (commandExecution.status === "waiting_for_approval") {
-            updateLiveActivity(thinkingActivityId, (entry) => ({
-              ...entry,
-              status: "idle",
-              detail: "Waiting for approval before running the sandbox command.",
-              timestamp: new Date().toISOString(),
-            }));
-            updateTaskTree(taskTree.id, (current) => ({
-              ...current,
-              status: "running",
-              updatedAt: new Date().toISOString(),
-              nodes: current.nodes.map((node) =>
-                node.kind === "execution"
-                  ? {
-                      ...node,
-                      status: "running",
-                      updatedAt: new Date().toISOString(),
-                    }
-                  : node,
-              ),
-            }));
-            finishReplyingForAgent();
-            return;
-          }
-
-          if (commandExecution.status === "queued") {
-            const queuedMessage =
-              commandExecution.result.error ||
-              "I queued the command on your local bridge. I’ll wait for the bridge activity/output before claiming it finished.";
-
-            updateLiveActivity(thinkingActivityId, (entry) => ({
-              ...entry,
-              status: "idle",
-              detail: "Command queued on local bridge",
-              timestamp: new Date().toISOString(),
-            }));
-            updateTaskTree(taskTree.id, (current) => ({
-              ...current,
-              status: "running",
-              finalSummary: queuedMessage,
-              updatedAt: new Date().toISOString(),
-              nodes: current.nodes.map((node) =>
-                node.kind === "execution"
-                  ? {
-                      ...node,
-                      status: "running",
-                      updatedAt: new Date().toISOString(),
-                    }
-                  : node,
-              ),
-            }));
-            await streamAssistantReply({
-              agent: selectedAgentSnapshot,
-              text: queuedMessage,
-              previousThread,
-            });
-            finishReplyingForAgent();
-            return;
-          }
-
-          if (commandExecution.status === "blocked") {
-            loopBlocked = true;
-            finalReasoning =
-              "Execution could not continue because the next sandbox action was blocked.";
-            break;
-          }
-
-          const executionResult = commandExecution.result;
-          executionSteps.push({
-            command: executionPlan.command,
-            cwd: executionPlan.cwd || selectedAgentSnapshot.workspace || "",
-            result: executionResult,
-          });
-          updateThoughtSnapshot({
-            agentId: selectedAgentSnapshot.id,
-            thought:
-              latestThoughtByAgentId[selectedAgentSnapshot.id]?.thought ||
-              finalReasoning ||
-              "Prepared a sandbox step.",
-            command: executionPlan.command,
-            observation:
-              executionResult.stdout?.slice(0, 240) ||
-              executionResult.stderr?.slice(0, 240) ||
-              executionResult.error ||
-              `Exit code ${executionResult.exitCode ?? "unknown"}`,
-          });
-
-          executionContextMessages.push({
-            id: `${selectedAgentSnapshot.id}-execution-step-${stepIndex}-${Date.now().toString(36)}`,
-            agentId: selectedAgentSnapshot.id,
-            role: "system",
-            sender: "Runtime",
-            content: [
-              `Completed sandbox step ${stepIndex + 1}.`,
-              `Command: ${executionPlan.command}`,
-              executionResult.cwd ? `Cwd: ${executionResult.cwd}` : "",
-              typeof executionResult.exitCode === "number"
-                ? `Exit code: ${executionResult.exitCode}`
-                : "",
-              executionResult.timedOut ? "The command timed out." : "",
-              executionResult.stdout
-                ? `stdout:\n${executionResult.stdout}`
-                : "",
-              executionResult.stderr
-                ? `stderr:\n${executionResult.stderr}`
-                : "",
-              executionResult.error ? `error: ${executionResult.error}` : "",
-              executionResult.artifacts?.length
-                ? `artifacts:\n${executionResult.artifacts
-                    .map(
-                      (artifact) =>
-                        artifact.path || artifact.url || artifact.name,
-                    )
-                    .filter(Boolean)
-                    .join("\n")}`
-                : "",
-            ]
-              .filter(Boolean)
-              .join("\n\n"),
-            timestamp: new Date().toISOString(),
-          });
-
-          if (!executionResult.ok) {
-            finalReasoning = "Execution stopped because a sandbox step failed.";
-            break;
-          }
-        }
+        );
+      } catch (err) {
+        loopError = err instanceof Error ? err.message : "Stream failed to connect to local runtime.";
       }
 
-      if (loopBlocked) {
-        const breaker = detectCircuitBreakerEvent({
-          agentId: selectedAgentSnapshot.id,
-          handoffCount: 0,
-          repeatedCommandCount: 1,
-          failureCount: 2,
-        });
-        if (breaker) {
-          addCircuitBreakerEvent(breaker);
-        }
-        updateTaskTree(taskTree.id, (current) => ({
-          ...current,
-          status: "blocked",
-          updatedAt: new Date().toISOString(),
-        }));
-        await streamAssistantReply({
-          agent: selectedAgentSnapshot,
-          text: "I couldn’t finish the full sandbox flow because the next step was blocked before execution. Check Activity for the command details.",
-          previousThread,
-        });
-
-        finishReplyingForAgent();
-        return;
-      }
-
-      if (executionSteps.length > 0) {
-        updateTaskTree(taskTree.id, (current) => ({
-          ...current,
-          status: "running",
-          updatedAt: new Date().toISOString(),
-          nodes: current.nodes.map((node) =>
-            node.kind === "analysis"
-              ? { ...node, status: "completed", updatedAt: new Date().toISOString() }
-              : node.kind === "execution" || node.kind === "synthesis"
-                ? { ...node, status: "completed", updatedAt: new Date().toISOString() }
-                : node.kind === "review"
-                  ? { ...node, status: "running", updatedAt: new Date().toISOString() }
-                  : node,
-          ),
-        }));
-        const assistantText = await summarizeAgentExecutionSequence({
-          agent: selectedAgentSnapshot,
-          previousThread,
-          userPrompt: expandedPrompt,
-          steps: executionSteps,
-          browserContextMessages,
-          finalReasoning,
-        });
-
-        await streamAssistantReply({
-          agent: selectedAgentSnapshot,
-          text: assistantText,
-          previousThread,
-        });
-
-        updateTaskTree(taskTree.id, (current) => ({
-          ...current,
-          status: "completed",
-          finalSummary: assistantText,
-          updatedAt: new Date().toISOString(),
-          nodes: current.nodes.map((node) =>
-            node.kind === "review"
-              ? { ...node, status: "completed", updatedAt: new Date().toISOString() }
-              : node,
-          ),
-        }));
-
-        finishReplyingForAgent();
-        return;
-      }
-
-      const result = await sendAgentRuntimeChat({
-        agent: withConnectorRuntimePrompt(
-          withLiveWebContextPrompt(runtimeChatAgent, {
-            hasBrowserLane: browserContextMessages.length > 0,
-          }),
-        ),
-        messages: [
-          ...memoryContext.runtimeMessages,
-          ...toRuntimeConversation(
-            [...previousThread, userMessage],
-            attachmentLibrary,
-          ),
-          ...browserContextMessages,
-        ],
-      });
-
-      if (!result.ok || !result.text) {
-        const errorMessage =
-          result.error || "The local runtime could not produce a response.";
-        updateTaskTree(taskTree.id, (current) => ({
-          ...current,
-          status: "failed",
-          updatedAt: new Date().toISOString(),
-        }));
-
-        setChatError(errorMessage);
+      if (loopError) {
+        setChatError(loopError);
         setRuntimeHealth((current) => ({
           ...current,
           ok: false,
-          error: errorMessage,
+          error: loopError!,
         }));
         setMessagesByAgent((current) => ({
           ...current,
@@ -7568,10 +7247,16 @@ function App() {
               agentId: selectedAgentSnapshot.id,
               role: "system",
               sender: "Runtime",
-              content: `Live runtime error: ${errorMessage}`,
+              content: `Live runtime error: ${loopError}`,
               timestamp: new Date().toISOString(),
             },
           ],
+        }));
+
+        updateTaskTree(taskTree.id, (current) => ({
+          ...current,
+          status: "failed",
+          updatedAt: new Date().toISOString(),
         }));
 
         if (selectedAgentSnapshot.source === "custom") {
@@ -7582,38 +7267,48 @@ function App() {
             lastSeen: new Date().toISOString(),
           }));
         }
+        
+        updateLiveActivity(thinkingActivityId, (entry) => ({
+          ...entry,
+          status: "failed",
+          detail: loopError!,
+          timestamp: new Date().toISOString(),
+        }));
+      } else if (finalSummaryText) {
+        await streamAssistantReply({
+          agent: selectedAgentSnapshot,
+          text: finalSummaryText,
+          previousThread,
+        });
 
-        finishReplyingForAgent();
-        return;
-      }
-
-      await streamAssistantReply({
-        agent: selectedAgentSnapshot,
-        text: result.text,
-        previousThread,
-      });
-
-      updateTaskTree(taskTree.id, (current) => ({
-        ...current,
-        status: "completed",
-        finalSummary: result.text,
-        updatedAt: new Date().toISOString(),
-        nodes: current.nodes.map((node) => ({
-          ...node,
-          status: node.kind === "analysis" ? "completed" : "completed",
+        updateTaskTree(taskTree.id, (current) => ({
+          ...current,
+          status: "completed",
+          finalSummary: finalSummaryText,
           updatedAt: new Date().toISOString(),
-        })),
-      }));
+          nodes: current.nodes.map((node) => ({
+            ...node,
+            status: "completed",
+            updatedAt: new Date().toISOString(),
+          })),
+        }));
 
-      if (selectedAgentSnapshot.source === "custom") {
-        updateCustomAgent(selectedAgentSnapshot.id, (agent) => ({
-          ...agent,
-          status: "idle",
-          currentActivity: "Ready in the thread workspace",
-          lastSeen: new Date().toISOString(),
+        if (selectedAgentSnapshot.source === "custom") {
+          updateCustomAgent(selectedAgentSnapshot.id, (agent) => ({
+            ...agent,
+            status: "idle",
+            currentActivity: "Ready in the thread workspace",
+            lastSeen: new Date().toISOString(),
+          }));
+        }
+        
+        updateLiveActivity(thinkingActivityId, (entry) => ({
+          ...entry,
+          status: "completed",
+          detail: "Execution complete.",
+          timestamp: new Date().toISOString(),
         }));
       }
-
       finishReplyingForAgent();
       return;
     }

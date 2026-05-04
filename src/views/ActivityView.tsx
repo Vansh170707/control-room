@@ -16,6 +16,7 @@ import {
 import { formatRelativeTime } from "@/lib/utils";
 import { runStatusMeta, statusMeta } from "@/constants";
 import { getRuntimeFileViewUrl } from "@/lib/agent-runtime";
+import type { AppState } from "@/store/useAppStore";
 
 interface ActivityMetricCard {
   label: string;
@@ -46,7 +47,7 @@ interface ActivityViewProps {
   workspaceAttentionCount: number;
   activityMetricCards: ActivityMetricCard[];
   selectedActivityRun: CommandRun | null;
-  refreshRuntimeRuns: () => Promise<void>;
+  refreshRuntimeRuns: () => void;
   isLoadingRuntimeRuns: boolean;
   runtimeRunsError: string | null;
   allAgents: WorkspaceAgent[];
@@ -56,7 +57,7 @@ interface ActivityViewProps {
   handleCancelRun: (run: CommandRun) => Promise<void>;
   isMutatingRunId: string | null;
   setSelectedFilePreviewPath: (path: string | null) => void;
-  setActivityDrawerTab: (tab: string) => void;
+  setActivityDrawerTab: AppState["setActivityDrawerTab"];
   activityFocusAgent: WorkspaceAgent | null;
   activityFocusPresence: ActivityFocusPresence | null;
   activityFocusRuns: CommandRun[];

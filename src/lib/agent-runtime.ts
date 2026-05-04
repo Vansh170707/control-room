@@ -264,6 +264,7 @@ export interface AgentLoopStreamEvent {
   finalText?: string;
   provider?: string;
   usage?: unknown;
+  durationMs?: number;
 }
 
 export async function executeAgentLoop(input: {

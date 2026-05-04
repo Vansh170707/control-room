@@ -17,8 +17,8 @@ export function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
 }
 
-export function formatRelativeTime(dateString: string) {
-  const date = new Date(dateString);
+export function formatRelativeTime(dateString: string | Date) {
+  const date = dateString instanceof Date ? dateString : new Date(dateString);
   const diffMs = Date.now() - date.getTime();
   const minute = 60_000;
   const hour = minute * 60;

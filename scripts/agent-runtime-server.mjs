@@ -1987,9 +1987,9 @@ function describeGeminiEmptyResponse(payload) {
     .join("; ");
 }
 
-function buildOpenAICompatibleMessages(agent, conversation) {
+function buildOpenAICompatibleMessages(agent, conversation, systemPromptOverride = null) {
   return [
-    { role: "system", content: buildSystemPrompt(agent) },
+    { role: "system", content: systemPromptOverride || buildSystemPrompt(agent) },
     ...conversation.map((message) => {
       const parts = buildOpenAIContentParts(message);
       return {
@@ -2059,7 +2059,7 @@ async function callOpenAI(agent, conversation) {
     },
     body: JSON.stringify({
       model: agent.model,
-      instructions: buildSystemPrompt(agent),
+      instructions: buildNativeToolPrompt(agent),
       input: buildResponsesInput(conversation),
       max_output_tokens: 1200,
     }),
@@ -2098,7 +2098,7 @@ async function callAnthropic(agent, conversation) {
     },
     body: JSON.stringify({
       model: agent.model,
-      system: buildSystemPrompt(agent),
+      system: buildNativeToolPrompt(agent),
       max_tokens: 1200,
       messages: conversation,
     }),
@@ -2139,7 +2139,7 @@ async function callOpenRouter(agent, conversation) {
     body: JSON.stringify({
       model: agent.model,
       max_tokens: 1200,
-      messages: buildOpenAICompatibleMessages(agent, conversation),
+      messages: buildOpenAICompatibleMessages(agent, conversation, buildNativeToolPrompt(agent)),
     }),
   });
 
@@ -2180,7 +2180,7 @@ async function callGemini(agent, conversation) {
           system_instruction: {
             parts: [
               {
-                text: buildSystemPrompt(agent),
+                text: buildNativeToolPrompt(agent),
               },
             ],
           },
@@ -2255,7 +2255,7 @@ async function callGroq(agent, conversation) {
     body: JSON.stringify({
       model: agent.model,
       max_tokens: 1200,
-      messages: buildOpenAICompatibleMessages(agent, conversation),
+      messages: buildOpenAICompatibleMessages(agent, conversation, buildNativeToolPrompt(agent)),
     }),
   });
 
@@ -2292,7 +2292,7 @@ async function callNvidia(agent, conversation) {
     body: JSON.stringify({
       model: agent.model || process.env.NVIDIA_CHAT_MODEL || "nvidia/llama-3.3-nemotron-super-49b-v1.5",
       max_tokens: 1200,
-      messages: buildOpenAICompatibleMessages(agent, conversation),
+      messages: buildOpenAICompatibleMessages(agent, conversation, buildNativeToolPrompt(agent)),
     }),
   });
 
@@ -2331,7 +2331,7 @@ async function callModal(agent, conversation) {
     body: JSON.stringify({
       model: agent.model || "zai-org/GLM-5.1-FP8",
       max_tokens: 1200,
-      messages: buildOpenAICompatibleMessages(agent, conversation),
+      messages: buildOpenAICompatibleMessages(agent, conversation, buildNativeToolPrompt(agent)),
     }),
   });
 
@@ -2370,7 +2370,7 @@ async function callGitHubModels(agent, conversation) {
     body: JSON.stringify({
       model: normalizeGitHubModelsModelId(agent.provider, agent.model),
       max_tokens: 1200,
-      messages: buildOpenAICompatibleMessages(agent, conversation),
+      messages: buildOpenAICompatibleMessages(agent, conversation, buildNativeToolPrompt(agent)),
     }),
   });
 
@@ -2497,7 +2497,7 @@ async function callCopilotProxy(agent, conversation, options = {}) {
     "User-Agent": "GithubCopilot/1.300.0",
   };
 
-  const messages = buildOpenAICompatibleMessages(agent, conversation);
+  const messages = buildOpenAICompatibleMessages(agent, conversation, buildNativeToolPrompt(agent));
 
   async function tryAlternativeFallback(baseError, phaseLabel) {
     const safeFallbackModel = allowCopilotModelFallback ? getCopilotSafeFallbackModel(copilotModel) : null;
@@ -2928,6 +2928,161 @@ function trimOutput(value, limit = 20_000) {
   }
 
   return value.length > limit ? `${value.slice(0, limit)}\n...[truncated]` : value;
+}
+
+function normalizeLineEndings(value = "") {
+  return String(value).replace(/\r\n/g, "\n");
+}
+
+function applyFindReplaceEdit(content, find, replace) {
+  const normalizedContent = normalizeLineEndings(content);
+  const normalizedFind = normalizeLineEndings(find);
+  const normalizedReplace = normalizeLineEndings(replace);
+
+  if (!normalizedFind) {
+    throw new Error("A non-empty find string is required for find/replace edits.");
+  }
+
+  const count = normalizedContent.split(normalizedFind).length - 1;
+  if (count === 0) {
+    throw new Error("The find text was not found in the file.");
+  }
+
+  return {
+    content: normalizedContent.split(normalizedFind).join(normalizedReplace),
+    count,
+  };
+}
+
+function applyUnifiedDiff(content, diffText) {
+  const original = normalizeLineEndings(content);
+  const diff = normalizeLineEndings(diffText);
+  const lines = original.split("\n");
+  const diffLines = diff.split("\n");
+  let cursor = 0;
+  const output = [];
+
+  for (let i = 0; i < diffLines.length; i += 1) {
+    const line = diffLines[i];
+
+    if (!line.startsWith("@@")) {
+      continue;
+    }
+
+    const match = line.match(/^@@\s+-(\d+)(?:,(\d+))?\s+\+(\d+)(?:,(\d+))?\s+@@/);
+    if (!match) {
+      throw new Error("Invalid unified diff hunk header.");
+    }
+
+    const oldStart = Math.max(0, Number(match[1]) - 1);
+    while (cursor < oldStart && cursor < lines.length) {
+      output.push(lines[cursor]);
+      cursor += 1;
+    }
+
+    i += 1;
+    while (i < diffLines.length && !diffLines[i].startsWith("@@")) {
+      const diffLine = diffLines[i];
+      if (diffLine.startsWith(" ")) {
+        const expected = diffLine.slice(1);
+        if (lines[cursor] !== expected) {
+          throw new Error(`Diff context mismatch at line ${cursor + 1}.`);
+        }
+        output.push(lines[cursor]);
+        cursor += 1;
+      } else if (diffLine.startsWith("-")) {
+        const expected = diffLine.slice(1);
+        if (lines[cursor] !== expected) {
+          throw new Error(`Diff deletion mismatch at line ${cursor + 1}.`);
+        }
+        cursor += 1;
+      } else if (diffLine.startsWith("+")) {
+        output.push(diffLine.slice(1));
+      }
+      i += 1;
+    }
+
+    i -= 1;
+  }
+
+  while (cursor < lines.length) {
+    output.push(lines[cursor]);
+    cursor += 1;
+  }
+
+  return output.join("\n");
+}
+
+function detectValidationCommands(workspace) {
+  const commands = [];
+  try {
+    const pkg = JSON.parse(readFileSync(resolve(workspace, "package.json"), "utf-8"));
+    const scripts = pkg?.scripts || {};
+    if (scripts.lint) commands.push({ kind: "test", command: "npm run lint" });
+    if (scripts.typecheck) commands.push({ kind: "test", command: "npm run typecheck" });
+    if (scripts.test) commands.push({ kind: "test", command: "npm test" });
+    if (scripts.build) commands.push({ kind: "build", command: "npm run build" });
+  } catch {}
+
+  if (commands.length === 0) {
+    commands.push({ kind: "build", command: "npm run build" });
+  }
+
+  return commands;
+}
+
+async function runValidationAfterEdit(agent, workspace, changedPath, editResult) {
+  const validationCommands = detectValidationCommands(workspace);
+  const results = [];
+
+  for (const entry of validationCommands) {
+    try {
+      const result = await new Promise((resolveResult) => {
+        const startedAt = Date.now();
+        let stdout = "";
+        let stderr = "";
+        const child = spawn(process.env.SHELL || "/bin/zsh", ["-lc", entry.command], {
+          cwd: workspace,
+          env: process.env,
+          stdio: ["ignore", "pipe", "pipe"],
+        });
+
+        child.stdout.on("data", (chunk) => { stdout += chunk.toString(); });
+        child.stderr.on("data", (chunk) => { stderr += chunk.toString(); });
+        child.on("close", (code) => {
+          resolveResult({
+            ok: (code ?? 1) === 0,
+            command: entry.command,
+            exitCode: code ?? 1,
+            stdout: trimOutput(stdout),
+            stderr: trimOutput(stderr),
+            durationMs: Date.now() - startedAt,
+          });
+        });
+        child.on("error", (error) => {
+          resolveResult({
+            ok: false,
+            command: entry.command,
+            exitCode: 1,
+            stdout: trimOutput(stdout),
+            stderr: trimOutput(`${stderr}\n${error.message}`),
+            durationMs: Date.now() - startedAt,
+          });
+        });
+      });
+      results.push(result);
+      if (!result.ok) break;
+    } catch (error) {
+      results.push({ ok: false, command: entry.command, error: error.message });
+      break;
+    }
+  }
+
+  return {
+    path: changedPath,
+    editResult,
+    validationResults: results,
+  };
 }
 
 function classifyCommandActivity(command = "") {
@@ -3714,6 +3869,21 @@ const TOOL_DEFINITIONS = [
     ],
   },
   {
+    name: "filesystem.edit",
+    category: "filesystem",
+    description: "Edit an existing file using find/replace or a unified diff.",
+    riskLevel: "high",
+    requiresApproval: true,
+    parameters: [
+      { name: "path", type: "string", required: true },
+      { name: "find", type: "string", required: false },
+      { name: "replace", type: "string", required: false },
+      { name: "content", type: "string", required: false },
+      { name: "patch", type: "boolean", required: false, default: false },
+      { name: "createIfMissing", type: "boolean", required: false, default: false },
+    ],
+  },
+  {
     name: "filesystem.list",
     category: "filesystem",
     description: "List files and directories in a workspace path.",
@@ -3941,6 +4111,26 @@ function checkToolApprovalNeeded(toolName, parameters, agent, sandboxMode) {
     }
 
     return { needed: false };
+  }
+
+  if (toolName === "filesystem.edit") {
+    const path = `${parameters.path || ""}`;
+    return {
+      needed: true,
+      reasons: [
+        "It edits a file in the workspace and may modify source code.",
+      ],
+      preview: {
+        command: undefined,
+        filePaths: [path],
+        diff: typeof parameters.content === "string" ? parameters.content.slice(0, 1000) : undefined,
+        url: undefined,
+        method: undefined,
+        summary: typeof parameters.find === "string"
+          ? `Find/replace edit for ${path}`
+          : `Patch/full-content edit for ${path}`,
+      },
+    };
   }
 
   if (toolName === "http.request") {
@@ -4231,6 +4421,60 @@ async function executeToolInternal(toolName, parameters, agent, workspacePath) {
         path: parameters.path,
         created: true,
         bytesWritten: Buffer.byteLength(parameters.content || "", "utf-8"),
+        durationMs: Date.now() - startedAt,
+      },
+    };
+  }
+
+  if (toolName === "filesystem.edit") {
+    const { readFile, writeFile, mkdir } = await import("node:fs/promises");
+    const targetPath = resolve(workspace, parameters.path || "");
+
+    if (!isPathInsideWorkspace(workspace, targetPath)) {
+      throw new Error("The requested path is outside the agent workspace.");
+    }
+
+    let original = "";
+    try {
+      original = await readFile(targetPath, { encoding: "utf-8" });
+    } catch (error) {
+      if (!parameters.createIfMissing) {
+        throw new Error(`Failed to read ${parameters.path}: ${error.message}`);
+      }
+    }
+
+    let nextContent = original;
+    if (parameters.patch) {
+      if (typeof parameters.content !== "string") {
+        throw new Error("patch=true requires content to contain a unified diff.");
+      }
+      nextContent = applyUnifiedDiff(original, parameters.content);
+    } else if (typeof parameters.find === "string" && typeof parameters.replace === "string") {
+      const result = applyFindReplaceEdit(original, parameters.find, parameters.replace);
+      nextContent = result.content;
+    } else if (typeof parameters.content === "string") {
+      nextContent = parameters.content;
+    } else {
+      throw new Error("filesystem.edit requires either find/replace, patch=true with content, or full content.");
+    }
+
+    await mkdir(resolve(targetPath, ".."), { recursive: true });
+    await writeFile(targetPath, nextContent, { encoding: "utf-8" });
+
+    const validation = await runValidationAfterEdit(agent, workspace, parameters.path, {
+      updated: true,
+      bytesWritten: Buffer.byteLength(nextContent, "utf-8"),
+    });
+
+    return {
+      ok: true,
+      tool: toolName,
+      data: {
+        path: parameters.path,
+        updated: true,
+        bytesWritten: Buffer.byteLength(nextContent, "utf-8"),
+        diff: parameters.patch ? parameters.content : undefined,
+        validation,
         durationMs: Date.now() - startedAt,
       },
     };
@@ -4587,14 +4831,14 @@ async function handleToolInvocation(body) {
   const parameters = validateToolParameters(toolName, rawParameters || {});
 
   if (sandboxMode === "none" && definition.category !== "delegation") {
-    const writeTools = ["filesystem.write", "shell.exec", "http.request"];
+    const writeTools = ["filesystem.write", "filesystem.edit", "shell.exec", "http.request"];
     if (writeTools.includes(toolName)) {
       throw new Error(`Tool "${toolName}" is not allowed with sandbox mode "none".`);
     }
   }
 
   if (sandboxMode === "read-only") {
-    const writeTools = ["filesystem.write", "shell.exec", "http.request"];
+    const writeTools = ["filesystem.write", "filesystem.edit", "shell.exec", "http.request"];
     if (writeTools.includes(toolName)) {
       throw new Error(`Tool "${toolName}" is not allowed with sandbox mode "read-only".`);
     }
@@ -5050,6 +5294,18 @@ function buildToolSchemaDescription(agent) {
   ].join("\n\n");
 }
 
+function buildNativeToolPrompt(agent) {
+  const toolNames = TOOL_DEFINITIONS.map((tool) => `${tool.name}`).join(", ");
+  return [
+    buildSystemPrompt(agent),
+    "",
+    "You can call tools. Prefer exact, minimal tool calls.",
+    `Available tools: ${toolNames}`,
+    "When you need a tool, emit a single JSON object with {\"tool\": \"name\", \"parameters\": {...}}.",
+    "Before any tool call, include <thought>...</thought>.",
+  ].join("\n");
+}
+
 function parseToolCallFromLlmResponse(text) {
   if (!text) return null;
 
@@ -5085,7 +5341,83 @@ function parseToolCallFromLlmResponse(text) {
   }
 }
 
+function normalizeToolCallResponse(result) {
+  if (!result || typeof result !== "object") return null;
+
+  if (typeof result.tool === "string" && result.parameters && typeof result.parameters === "object") {
+    return {
+      tool: result.tool,
+      parameters: result.parameters,
+    };
+  }
+
+  if (Array.isArray(result.tool_calls) && result.tool_calls.length > 0) {
+    const first = result.tool_calls[0];
+    const tool = first?.name || first?.tool || first?.function?.name;
+    const args = first?.arguments || first?.function?.arguments || first?.params;
+    if (!tool) return null;
+    let parameters = {};
+    try {
+      parameters = typeof args === "string" ? JSON.parse(args) : args || {};
+    } catch {
+      parameters = {};
+    }
+    return { tool, parameters };
+  }
+
+  return null;
+}
+
 const activeAgentRuns = new Map();
+
+
+function buildWorkspaceAutoContext(workspaceDir) {
+  const parts = [];
+  parts.push("### Auto-Loaded Workspace Context");
+  parts.push("The following context was automatically loaded to help you understand the project structure without needing to manually read these common files.");
+
+  // 1. Core Config Files
+  const configsToTry = ["package.json", "pyproject.toml", "Cargo.toml", "composer.json", "go.mod", "tsconfig.json"];
+  let foundConfig = false;
+  for (const file of configsToTry) {
+    const fullPath = resolve(workspaceDir, file);
+    if (existsSync(fullPath)) {
+      try {
+        const fileContent = readFileSync(fullPath, "utf-8");
+        // Limit to 4000 chars to avoid blowing up context
+        const truncated = fileContent.length > 4000 ? fileContent.slice(0, 4000) + "\n... (truncated)" : fileContent;
+        parts.push(`#### ${file}\n\`\`\`\n${truncated}\n\`\`\``);
+        foundConfig = true;
+      } catch (e) {}
+    }
+  }
+
+  // 2. Readme
+  const readmesToTry = ["README.md", "README.txt", "readme.md"];
+  for (const file of readmesToTry) {
+    const fullPath = resolve(workspaceDir, file);
+    if (existsSync(fullPath)) {
+      try {
+        const fileContent = readFileSync(fullPath, "utf-8");
+        const truncated = fileContent.length > 2500 ? fileContent.slice(0, 2500) + "\n... (truncated)" : fileContent;
+        parts.push(`#### ${file} (Snippet)\n\`\`\`\n${truncated}\n\`\`\``);
+        break; // Only include the first README found
+      } catch (e) {}
+    }
+  }
+
+  // 3. Git Status
+  try {
+    const gitStatus = execSync("git status -s", { cwd: workspaceDir, encoding: "utf-8", stdio: ["ignore", "pipe", "ignore"] }).trim();
+    if (gitStatus) {
+      parts.push(`#### Current Git Status\n\`\`\`\n${gitStatus}\n\`\`\``);
+    } else {
+      parts.push("#### Current Git Status\nNo uncommitted changes.");
+    }
+  } catch (e) {}
+
+  return parts.join("\n\n");
+}
 
 async function runAgenticLoop(body, request, response) {
   const agent = body?.agent;
@@ -5100,6 +5432,7 @@ async function runAgenticLoop(body, request, response) {
   const runId = `arun_${randomUUID()}`;
   const workspace = resolve(agent.workspace || process.cwd());
   const startedAt = Date.now();
+  const autoContextText = buildWorkspaceAutoContext(workspace);
 
   const runRecord = {
     id: runId,
@@ -5135,6 +5468,8 @@ async function runAgenticLoop(body, request, response) {
   const toolSchema = buildToolSchemaDescription(agent);
   const enrichedSystemPrompt = [
     buildSystemPrompt(agent),
+    "",
+    autoContextText,
     "",
     "---",
     "",
@@ -5222,7 +5557,7 @@ async function runAgenticLoop(body, request, response) {
         usage: chatResult.usage,
       });
 
-      const parsedToolCall = parseToolCallFromLlmResponse(llmText);
+      const parsedToolCall = normalizeToolCallResponse(chatResult) || parseToolCallFromLlmResponse(llmText);
 
       if (parsedToolCall && parsedToolCall.error) {
         conversation.push({ role: "assistant", content: llmText });
@@ -5317,9 +5652,30 @@ async function runAgenticLoop(body, request, response) {
 
       runRecord.toolCalls = [...(runRecord.toolCalls || []), toolCallRecord];
 
-      const resultSummary = toolResult.ok
+      let resultSummary = toolResult.ok
         ? JSON.stringify(toolResult.data || {}, null, 2).slice(0, 6000)
         : `Error: ${toolResult.error || "Tool execution failed."}`;
+
+      if (toolName === "filesystem.edit" && toolResult.ok && toolResult.data?.validation?.validationResults) {
+        const validationResults = toolResult.data.validation.validationResults;
+        const validationText = validationResults
+          .map((entry) => {
+            if (entry.ok) {
+              return `[validation ok] ${entry.command} (${entry.durationMs}ms)`;
+            }
+            return `[validation failed] ${entry.command}: ${entry.error || entry.stderr || "Unknown error"}`;
+          })
+          .join("\n");
+
+        resultSummary = `${resultSummary}\n\nValidation:\n${validationText}`;
+
+        if (validationResults.some((entry) => !entry.ok)) {
+          conversation.push({
+            role: "user",
+            content: `Validation failed after editing ${toolResult.data.path}. Fix the issues and try again.\n\n${validationText}`,
+          });
+        }
+      }
 
       conversation.push({ role: "assistant", content: llmText });
       conversation.push({ role: "user", content: `[Tool Result: ${toolName}]\n${resultSummary}` });
